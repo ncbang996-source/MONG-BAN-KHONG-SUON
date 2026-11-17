@@ -71,9 +71,9 @@ def vee(c: Ctx, x1, y1, x2, y2):
 
 
 def bolts_plan(c: Ctx, g: Geo, px, py):
-    """Cụm 4 bu lông neo nhìn từ trên (khoảng cách theo cổ móng)."""
-    o = 0.47 * g.ph
-    r = max(0.3, 0.12 * g.ph)
+    """Cụm 4 bu lông neo nhìn từ trên, kích thước thật (khoảng cách 2t, Ø theo tên bu lông)."""
+    o = g.k * model.bolt_gap(g.p) / 2
+    r = max(0.3, 0.5 * g.k * model.bolt_dia(g.p) / 1000.0)
     for sx in (-1, 1):
         for sy in (-1, 1):
             x, y = px + sx * o, py + sy * o
@@ -97,7 +97,7 @@ def _unused_title(c, x, y, s, scale_txt):
 # ---------------------------------------------------------------------------
 def draw_section(c: Ctx, g: Geo):
     p = g.p
-    cx, k = g.cx, g.k
+    cx = g.cx
     h1, h2 = p["H1"], p["H2"]
     # bê tông móng
     c.ln("MAIN", cx - g.hL, g.ybase, cx - g.hL, g.yed)
@@ -133,7 +133,7 @@ def draw_section(c: Ctx, g: Geo):
     c.ln("TRUC", cx, g.ylb - 1.5, cx, g.ytop + 4.4)
     sym(c, cx, g.ytop - 0.5)
     ybt = section_bolts(c, g)
-    xb = cx + g.dx + 0.47 * g.ph + 1.1
+    xb = cx + g.dx + g.k * model.bolt_gap(g.p) / 2 + 1.1
     yb = (g.ytop + ybt) / 2
     with c.item("bln", "Ghi chú bu lông"):
         c.ln("CHU", xb, yb, xb + 6.0, yb, fixed1=True)
@@ -164,12 +164,16 @@ BOLT_GAP = 0.05    # khe hở thực tế giữa vòng đệm / đai ốc và m�
 
 
 def bolt_side(c: Ctx, g: Geo, xb, ytop):
-    """Bu lông neo nhìn ngang: thân + vòng đệm + 2 đai ốc, đặt cách mặt cổ móng 1 khe hở."""
-    gp = max(0.8, g.k * BOLT_GAP)
-    c.rect("CHU", xb - 0.3, ytop, xb + 0.3, ytop + 3.4 + gp)
-    for x0, y0, x1, y1 in ((-1.1, 0, 1.1, 0.25), (-0.8, 0.25, 0.8, 1.15), (-0.8, 1.45, 0.8, 2.35)):
-        c.rect("CHU", xb + x0, ytop + gp + y0, xb + x1, ytop + gp + y1)
-    return ytop + gp + 3.4
+    """Bu lông neo nhìn ngang, kích thước thật ở tỷ lệ hình: thân Ø nhô cao h (bảng bu lông) khỏi mặt cổ móng,
+    vòng đệm rộng 3Ø dày 0.35Ø, 2 đai ốc rộng 2.2Ø cao 1.25Ø, cách mặt cổ móng BOLT_GAP."""
+    k = g.k
+    gp = k * BOLT_GAP
+    u = k * model.bolt_dia(g.p) / 1000.0
+    top = ytop + max(gp + 4.7 * u, k * model.bolt_h(g.p))
+    c.rect("CHU", xb - 0.5 * u, ytop, xb + 0.5 * u, top)
+    for x0, y0, x1, y1 in ((-1.5, 0, 1.5, 0.35), (-1.1, 0.35, 1.1, 1.6), (-1.1, 2.0, 1.1, 3.25)):
+        c.rect("CHU", xb + x0 * u, ytop + gp + y0 * u, xb + x1 * u, ytop + gp + y1 * u)
+    return top
 
 
 def section_bolts(c: Ctx, g: Geo, cx=None):
@@ -177,7 +181,7 @@ def section_bolts(c: Ctx, g: Geo, cx=None):
     top = g.ytop
     for s in (-1, 1):
         for t in (-1, 1):
-            top = bolt_side(c, g, cx + s * g.dx + t * 0.47 * g.ph, g.ytop)
+            top = bolt_side(c, g, cx + s * g.dx + t * g.k * model.bolt_gap(g.p) / 2, g.ytop)
     return top
 
 
@@ -253,26 +257,45 @@ def dim_pier(c: Ctx, g: Geo, cx, xmax_left=None):
 
 # ---------------------------------------------------------------------------
 def draw_route(c: Ctx, g: Geo, cx, cy):
+    """Hướng tuyến qua tim móng: đỡ - 2 chiều theo Y; néo thẳng - như đỡ, thêm phân giác sang trái; néo góc, néo hãm -
+    2 tia lệch 10°, phân giác sang trái; néo góc 90° - lên (+Y) và sang trái (−X); néo dừng - 1 chiều."""
     ht = int(g.p["HT"])
     lh = g.hB - 1.0
+    lx = g.hL - 1.0
     wr = txtw(T_ROUTE, 2.0)
-    if ht == 1:
+    a = max(4.6 + wr / 2, min(0.5 * lh, lh - 2.4 - wr / 2))
+    if ht in model.HT_ANGLE:
         dlt = math.radians(10.0)
         sn, cs = math.sin(dlt), math.cos(dlt)
-        vee(c, cx, cy, cx + lh * sn, cy + lh * cs)
-        vee(c, cx, cy, cx + lh * sn, cy - lh * cs)
-        # chữ song song mũi tên, nằm bên phải, không chạm mũi tên và chữ "HƯỚNG PHÂN GIÁC"
-        a = max(4.6 + wr / 2, min(0.5 * lh, lh - 2.4 - wr / 2))
-        c.txr("CHU", cx + a * sn + 2.4 * cs, cy + a * cs - 2.4 * sn, 2.0, T_ROUTE, 90.0 - 10.0)
-        vee(c, cx, cy, cx + g.hL - 1.0, cy)
-        c.tx("CHU", cx + 6.0, cy + 1.2, 2.0, T_BISECT)
+        vee(c, cx, cy, cx - lh * sn, cy + lh * cs)
+        vee(c, cx, cy, cx - lh * sn, cy - lh * cs)
+        c.txr("CHU", cx - a * sn - 2.4 * cs, cy + a * cs - 2.4 * sn, 2.0, T_ROUTE, 90.0 + 10.0)
+        vee(c, cx, cy, cx - lx, cy)
+        c.tx("CHU", cx - lx + 2.5, cy + 1.6, 2.0, T_BISECT)        # chữ ở đầu xa của mũi tên phân giác
     elif ht == 2:
         vee(c, cx, cy, cx, cy - lh)
-        c.txr("CHU", cx + 2.4, cy - 0.5 * lh, 2.0, T_ROUTE, 90.0)
+        c.txr("CHU", cx - 2.4, cy - a, 2.0, T_ROUTE, 90.0)
+    elif ht == model.HT_90:                                     # néo góc 90°: lên và sang trái, không phân giác
+        vee(c, cx, cy, cx, cy + lh)
+        c.txr("CHU", cx - 2.4, cy + a, 2.0, T_ROUTE, 90.0)
+        vee(c, cx, cy, cx - lx, cy)
+        c.txr("CHU", cx - max(4.6 + wr / 2, min(0.5 * lx, lx - 2.4 - wr / 2)), cy + 2.4, 2.0, T_ROUTE, 0.0)
     else:
         vee(c, cx, cy, cx, cy - lh)
         vee(c, cx, cy, cx, cy + lh)
-        c.txr("CHU", cx + 2.4, cy + max(1.5 + wr / 2, min(0.5 * lh, lh - 2.4 - wr / 2)), 2.0, T_ROUTE, 90.0)
+        c.txr("CHU", cx - 2.4, cy + a, 2.0, T_ROUTE, 90.0)
+        if ht in model.HT_BISECT:
+            vee(c, cx, cy, cx - lx, cy)
+            c.tx("CHU", cx - lx + 2.5, cy + 1.6, 2.0, T_BISECT)
+
+
+def tim_mong(c: Ctx, cx, cy, r):
+    """Ký hiệu tim móng: vòng tròn, tô đen 2 góc phần tư đối đỉnh."""
+    c.ci("CHU", cx, cy, r)
+    for a0 in (0.0, 180.0):
+        pts = [(cx, cy)] + [(cx + r * math.cos(math.radians(a0 + t)), cy + r * math.sin(math.radians(a0 + t)))
+                            for t in range(0, 91, 10)]
+        c.solid("CHU", pts)
 
 
 def plan_outline(c: Ctx, g: Geo, cx, cy, bolts=True):
@@ -296,10 +319,15 @@ def plan_outline(c: Ctx, g: Geo, cx, cy, bolts=True):
 def draw_plan(c: Ctx, g: Geo):
     cx, cy = g.cx, g.planCy
     plan_outline(c, g, cx, cy)
-    c.ci("CHU", cx, cy, 1.2)
+    tim_mong(c, cx, cy, 1.2)
     with c.item("axis", "Ghi chú tim móng"):
-        c.pl("CHU", False, [(cx, cy), (cx - 3.0, cy - 4.7), (cx - 17.4, cy - 4.7)], fixed=(0,))
-        c.tx("CHU", cx - 17.7, cy - 3.8, 2.0, T_AXIS)
+        w = txtw(T_AXIS, 2.0)
+        if int(g.p["HT"]) in model.HT_TIM_BR:   # mũi tên chạy sang trái -> ghi tim móng phía dưới bên phải
+            c.pl("CHU", False, [(cx, cy), (cx + 3.0, cy - 4.7), (cx + 4.0 + w, cy - 4.7)], fixed=(0,))
+            c.tx("CHU", cx + 3.9, cy - 4.7 + 0.9, 2.0, T_AXIS)
+        else:
+            c.pl("CHU", False, [(cx, cy), (cx - 3.0, cy - 4.7), (cx - 4.0 - w, cy - 4.7)], fixed=(0,))
+            c.tx("CHU", cx - 3.9 - w, cy - 4.7 + 0.9, 2.0, T_AXIS)
     draw_route(c, g, cx, cy)
     title(c, cx, cy - g.hLotY - 22.8, T_PLAN, f"TL:1/{g.den}")
 
@@ -331,7 +359,8 @@ def dim_plan(c: Ctx, g: Geo, cx, cy, lot=True):
 # ---------------------------------------------------------------------------
 def draw_summary(c: Ctx, g: Geo):
     p = g.p
-    cls = [x for x in g.klc if x[2] > 1e-6]
+    dp = g.dp()                      # dự phòng thép: chỉ cộng vào bảng tổng kê (bảng thống kê thép không cộng)
+    cls = [(d, t, w * dp) for d, t, w in g.klc if w > 1e-6]
     tot = sum(x[2] for x in cls)
     cols = [(p["BTM"], "(m3)", 15.0, f"{model.vol_mong(p):.2f}"),
             (p["BTL"], "(m3)", 15.0, f"{model.vol_lot(p):.2f}")]

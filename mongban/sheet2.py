@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import math
 
+from . import model
 from .cad import Ctx, txtw
-from .geom import Geo, ceil_
-from .sheet1 import marker, sym, bolts_plan, plan_outline, dim_plan, dim_pier, title, draw_note, note_at, section_bolts
+from .geom import ANCHOR, Geo, ceil_
+from .sheet1 import marker, sym, plan_outline, dim_plan, dim_pier, title, draw_note, note_at, section_bolts
 
 T_TOP = "THÉP LỚP TRÊN"
 T_BOT = "THÉP LỚP DƯỚI"
@@ -106,8 +107,9 @@ def balloon(c: Ctx, x, y, num):
 class Callouts:
     """Chú thích số hiệu thép: các nhánh tới mục tiêu -> đoạn ngang -> vòng tròn số."""
 
-    def __init__(self, c: Ctx, g: Geo):
+    def __init__(self, c: Ctx, g: Geo, nonum=False):
         self.c, self.g = c, g
+        self.nonum = nonum          # True: không vẽ vòng số hiệu (TKKT)
 
     def __call__(self, targets, bx, by, side, num, txt1, txt2=None, tick=True, mode=True):
         with self.c.item(f"callout{num}", f"Chú thích thép {self.g.sq(num)}"):
@@ -158,7 +160,8 @@ class Callouts:
         c.txj("CHU", tx, by + 0.8, 2.0, txt1, 2 if side > 0 else 0)
         if txt2:
             c.txj("CHU", tx, by - 2.8, 2.0, txt2, 2 if side > 0 else 0)
-        balloon(c, bx, by, self.g.sq(num))
+        if not self.nonum:
+            balloon(c, bx, by, self.g.sq(num))
         return min(ex, bx - 3.0), max(ex, bx + 3.0)
 
 
@@ -213,7 +216,7 @@ def d2_section(c: Ctx, g: Geo, co: Callouts):
     c.ln("TRUC", cx, g.ylt2 - 1.5, cx, g.ytop + 4.4)
     sym(c, cx, g.ytop - 0.5)
     # thép bản móng
-    off, offb = k * cov, k * p["COVER_B"]
+    off = k * cov
     span = g.bar_span()
     # thép theo phương cạnh dài nằm ngoài cùng (chịu mômen lớn hơn)
     ybd, ybl, dtd, dtl = g.layer_levels()
@@ -244,8 +247,8 @@ def d2_section(c: Ctx, g: Geo, co: Callouts):
     # thép cổ móng bên phải
     pcx = cx + g.dx
     ytb = g.ytop - off
-    ybb = g.ybase + offb + 2 * k * p["RB_BOT_D"] / 1000.0
-    foot = 0.3 * k
+    ybb = g.pier_ybb()
+    foot = ANCHOR * k
     xl, xr = pcx - (g.ph - off), pcx + (g.ph - off)
     c.pl("COTTHEP", False, [(xl, ytb), (xl, ybb), (xl - foot, ybb)])     # móc chân quay ra ngoài
     c.pl("COTTHEP", False, [(xr, ytb), (xr, ybb), (xr + foot, ybb)])
@@ -265,24 +268,9 @@ def d2_section(c: Ctx, g: Geo, co: Callouts):
     d2_cutmark(c, g, yc2)
 
 
-def chair_xs(g: Geo, span):
-    """Vị trí thanh chống trên mặt cắt A-A. Khi thép phương ngắn nằm lớp trong, thanh chống đặt sát
-    cạnh thanh thép phương ngắn gần nhất (để buộc cùng)."""
-    xs = g.offs_ch(span)
-    if not g.long_x():
-        return xs
-    dots = g.offs_top(span, g.hPl / g.k, g.g("RB_BOT_S") / 1000.0)
-    gap = g.rbar("RB_BOT_D") + g.rbar("RB_CH_D")
-    out = []
-    for x in xs:
-        dd = min(dots, key=lambda v: abs(v - x))
-        side = 1.0 if x >= dd or abs(dd) < 1e-9 and x >= 0 else -1.0
-        side = side if dd != max(dots) else -1.0      # không đẩy ra ngoài thanh biên
-        side = side if dd != min(dots) else 1.0
-        nx = dd + side * gap
-        if all(abs(nx - o) > 1e-6 for o in out):
-            out.append(nx)
-    return sorted(out)
+def chair_xs(g: Geo, span=None):
+    """Vị trí thanh chống trên mặt cắt A-A (mm giấy, từ tim) - lấy từ Geo.chair_grid (cùng nguồn bảng thống kê)."""
+    return [g.k * x for x in g.chair_xs()]
 
 
 def d2_cutmark(c: Ctx, g: Geo, ymin):
@@ -299,8 +287,7 @@ def d2_section_callouts(c: Ctx, g: Geo, co: Callouts):
     p = g.p
     cx, k = g.cx2, g.k
     cov = p["COVER"]
-    off, offb = k * cov, k * p["COVER_B"]
-    rdb, rdt = g.rbar("RB_BOT_D"), g.rbar("RB_TOP_D")
+    off = k * cov
     span = g.bar_span()
     bxr = cx + g.hL + 4.0
     bxp = cx + g.dx + g.ph + 6.0
@@ -753,7 +740,8 @@ def d2_bartable(c: Ctx, g: Geo, tx, ty, pos, ybot=None):
 def draw(c: Ctx, g: Geo):
     if not getattr(g, "kl", None):
         g.calc_kl()
-    co = Callouts(c, g)
+    tkkt = model.is_tkkt(g.p)
+    co = Callouts(c, g, nonum=tkkt)
     with c.group("section", "Mặt cắt A-A (thép)"):
         d2_section(c, g, co)
         d2_dim_section(c, g)
@@ -764,6 +752,10 @@ def draw(c: Ctx, g: Geo):
         d2_sec11(c, g, co, 212.0, 236.0)
     with c.group("mesh", "Lưới thép đầu trụ"):
         d2_mesh(c, g, co, 298.0, 236.0)
+    note = "- XEM GHI CHÚ CHUNG TẠI BẢN VẼ SỐ: " + str(g.p.get("CODE", ""))
+    if tkkt:            # TKKT: không có bảng thống kê cốt thép và bảng kích thước từng thanh
+        draw_note(c, note)
+        return
     hh = 40.0 * g.p["BB"] / 2
     with c.table("table", "Bảng thống kê cốt thép"):
         ytb = d2_table(c, g, 264.0, min(188.0, 236.0 - hh - 27.0))
@@ -779,3 +771,8 @@ def draw(c: Ctx, g: Geo):
     for x, pos in ((22.0, 2), (103.0, 4), (184.0, 5)):
         with c.table(f"bar{pos}", f"Bảng kích thước thanh số {g.sq(pos)}"):
             d2_bartable(c, g, x, yb, pos, ybot=ybot)
+
+
+def sheet_den(g) -> int:
+    """Tỷ lệ ghi ở khung tên tờ 2: tỷ lệ hình bố trí thép (mặt cắt A-A)."""
+    return g.den

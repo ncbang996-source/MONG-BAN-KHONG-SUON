@@ -8,6 +8,7 @@ from .model import SLOPE_DRAW
 KGM = {6: 0.222, 8: 0.395, 10: 0.617, 12: 0.888, 14: 1.21, 16: 1.58, 18: 2.0, 20: 2.47,
        22: 2.98, 25: 3.85, 28: 4.83, 32: 6.31, 36: 7.99, 40: 9.86, 50: 15.42}
 NPIER = 4   # số thân trụ
+ANCHOR = 0.5   # đoạn neo chân thép chủ cổ móng (m)
 
 
 def ceil_(x):
@@ -114,8 +115,10 @@ class Geo:
         return self.hPl - off * (math.sqrt(1 + sl * sl) - 1) / sl
 
     def hook_top(self):
-        return (self.yed - self.ybase) / self.k - self.g("COVER") - self.g("COVER_B") - \
+        """Chân móc 2 đầu thanh lớp trên (m): hv − cv − cvb − (Ø dưới + Ø trên), làm tròn XUỐNG tới 5 mm."""
+        h = (self.yed - self.ybase) / self.k - self.g("COVER") - self.g("COVER_B") - \
             (self.g("RB_TOP_D") + self.g("RB_BOT_D")) / 1000.0
+        return max(0.0, 0.005 * math.floor(h / 0.005 + 1e-6))
 
     def long_x(self):
         """True nếu cạnh dài theo X (L >= B): thép theo X nằm ngoài cùng ở cả lớp dưới và lớp trên."""
@@ -135,18 +138,88 @@ class Geo:
         rd = max(self.rbar("RB_BOT_D"), self.rbar("RB_TOP_D"))
         return self.g("L") - 2 * self.g("COVER") - 2 * rd / self.k
 
-    # ---- đai cổ móng ---------------------------------------------------
-    def hoop_hp(self):
-        return ((self.ytop - self.k * self.g("COVER")) - self.ypl) / self.k
+    # ---- thanh chống -------------------------------------------------
+    def pier_rows(self, d):
+        """Toạ độ (m, từ tim móng) các hàng thép chủ cổ móng theo 1 phương; d = nửa khoảng cách tim trụ."""
+        w = self.g("BB") / 2 - self.g("COVER") - self.g("RT_D") / 1000.0 - self.g("RC_D") / 2000.0
+        return [s * d + t * w for s in (-1, 1) for t in (-1, 1)]
 
-    def hoop_n(self, s):
-        return 1 + max(1, ceil_(self.hoop_hp() / s))
+    def chair_grid(self):
+        """Thanh chống [(x, y)] (m, từ tim móng) - một nguồn cho hình vẽ và bảng thống kê.
+        Lưới @ thanh chống trong phạm vi bản móng trừ 1 bước mỗi bên. Thép phương cạnh ngắn nằm trong (long_x):
+        thanh chống xoay (chân theo phương ngắn), mỗi toạ độ x dời ít nhất để sát cạnh thanh thép phương ngắn gần
+        nhất (có ở cả lớp dưới và lớp trên). Toạ độ gần hàng thép chủ cổ móng dời ra để tránh thép chủ."""
+        g, k = self.g, self.k
+        s = g("RB_CH_S") / 1000.0
+        c = g("COVER")
+        xs = [v / k for v in self.offs(max(s, g("L") - 2 * c - 2 * s), s)]
+        ys = [v / k for v in self.offs(max(s, g("B") - 2 * c - 2 * s), s)]
+        cl = g("RC_D") / 2000.0 + g("RB_CH_D") / 2000.0 + 0.04
+        rx, ry = self.pier_rows(g("L1") / 2), self.pier_rows(g("L2") / 2)
+
+        def away(a, rows):
+            for r in rows:
+                if abs(a - r) < cl:
+                    return r - cl if a < r else r + cl
+            return a
+        if self.long_x():
+            span = self.bar_span()
+            bot = [v / k for v in self.offs_top(span, self.hPl / k, g("RB_BOT_S") / 1000.0)]
+            top = [v / k for v in self.offs_top(span, self.hPl / k, g("RB_TOP_S") / 1000.0)]
+            same = sorted({round(abs(d), 6) for d in bot if any(abs(d - t) < 0.02 for t in top)}) or \
+                sorted({round(abs(d), 6) for d in bot})
+            off = max(g("RB_BOT_D"), g("RB_TOP_D")) / 2000.0 + g("RB_CH_D") / 2000.0
+            edge = max(same)
+
+            def snap(a):
+                aa = abs(a)
+                for ad in sorted(same, key=lambda d: (abs(d - aa), d)):
+                    xa = ad + off if (aa >= ad or ad <= off) and ad < edge - 1e-9 else ad - off
+                    if all(abs(xa - abs(r)) >= cl for r in rx):
+                        return math.copysign(xa, a)
+                return a
+            xs = [snap(x) for x in xs]
+        else:
+            xs = [away(x, rx) for x in xs]
+        ys = [away(y, ry) for y in ys]
+        return [(x, y) for x in xs for y in ys]
+
+    def chair_xs(self):
+        """Toạ độ x (m) khác nhau của thanh chống (thấy trên mặt cắt A-A)."""
+        return sorted({round(x, 6) for x, _ in self.chair_grid()})
+
+    # ---- đai cổ móng ---------------------------------------------------
+    def mesh_ys(self):
+        """Cao độ giấy các lớp lưới thép đầu trụ (tâm lớp thanh dưới cùng của lưới)."""
+        ytb = self.ytop - self.k * self.g("COVER")
+        mr = self.rbar("RL_D")
+        return [ytb - mr - i * self.k * self.g("RL_S") / 1000.0 for i in range(int(self.g("RL_N")))]
 
     def hoop_ys(self):
-        n = self.hoop_n(self.g("RT_S") / 1000.0)
-        y0 = self.ytop - self.k * self.g("COVER")
-        y1 = self.ypl
+        """Đai cổ móng (cao độ giấy): đai dưới từng lớp lưới đầu trụ (đỡ lưới, cách theo bước lưới), còn lại @ đai
+        tới mặt bản móng."""
+        k = self.k
+        ytb = self.ytop - k * self.g("COVER")
+        sl = k * self.g("RL_S") / 1000.0
+        dl = k * self.g("RL_D") / 1000.0
+        top = [ytb - i * sl - 2 * dl for i in range(int(self.g("RL_N")))]
+        y0, y1 = top[-1], self.ypl
+        s = k * self.g("RT_S") / 1000.0
+        if y0 - y1 <= 1e-6:
+            return top
+        n = 1 + max(1, ceil_((y0 - y1) / s - 1e-6))
+        return top + [y0 - i * (y0 - y1) / (n - 1) for i in range(1, n)]
+
+    def tie_ys(self):
+        """Mức đai phụ (thẳng, bát giác): rải @ đai phụ từ đai trên cùng xuống mặt bản móng."""
+        y0, y1 = self.hoop_ys()[0], self.ypl
+        s = self.k * self.g("RP_S") / 1000.0
+        n = 1 + max(1, ceil_((y0 - y1) / s - 1e-6))
         return [y0 - i * (y0 - y1) / (n - 1) for i in range(n)]
+
+    def pier_ybb(self):
+        """Cao độ giấy tim đoạn neo chân thép chủ cổ móng: tựa trên cả 2 phương thép lớp dưới."""
+        return self.ybase + self.k * (self.g("COVER_B") + 2 * self.g("RB_BOT_D") / 1000.0 + self.g("RC_D") / 2000.0)
 
     def m_bars(self):
         return 1 + int(self.g("RC_N") / 4.0)
@@ -236,7 +309,7 @@ class Geo:
         hbm, hvm = (self.ypl - self.ybase) / k, (self.yed - self.ybase) / k
         px, lx, py, ly = self.hPl / k, self.hL / k, self.hPy / k, self.hB / k
         dia, s = self.g("RB_TOP_D"), self.g("RB_TOP_S") / 1000.0
-        hk = 0.1 * ceil_(self.hook_top() / 0.1)
+        hk = self.hook_top()
         if pos == 2:
             ps = self.pairs([v / k for v in self.offs_top(lm - 2 * c, px, s)])
         else:
@@ -281,22 +354,18 @@ class Geo:
         R(3, dia, 1000 * (lm - 2 * c), str(n), n * (lm - 2 * c), [1000 * (lm - 2 * c)])
         b4, s4 = self.calc_top(4)
         rows.append(s4)
-        # 5: thép chống
-        s5 = g("RB_CH_S") / 1000.0
-        xs = [v / k for v in self.offs(max(s5, lm - 2 * c - 2 * s5), s5)]
-        ys = [v / k for v in self.offs(max(s5, bm - 2 * c - 2 * s5), s5)]
+        # 5: thép chống (vị trí như hình vẽ - chair_grid), thân = cao bản móng tại vị trí - 2 lớp bảo vệ - 2Ø
         hkc = 0.1
         n, tot, g5 = 0, 0.0, {}
-        for x in xs:
-            for y in ys:
-                u = max(0.0, (abs(x) - px) / (lx - px))
-                v = max(0.0, (abs(y) - py) / (ly - py))
-                h = hbm - (hbm - hvm) * max(u, v)
-                leg = h - c - cb - dt - db
-                n += 1
-                tot += leg + 2 * hkc
-                key = int(1000 * leg + 0.5)
-                g5[key] = g5.get(key, 0) + 1
+        for x, y in self.chair_grid():
+            u = max(0.0, (abs(x) - px) / (lx - px))
+            v = max(0.0, (abs(y) - py) / (ly - py))
+            h = hbm - (hbm - hvm) * max(u, v)
+            leg = h - c - cb - dt - db
+            n += 1
+            tot += leg + 2 * hkc
+            key = int(1000 * leg + 0.5)
+            g5[key] = g5.get(key, 0) + 1
         b5 = []
         for i, (key, cnt) in enumerate(sorted(g5.items(), reverse=True), 1):
             ln = key / 1000.0 + 2 * hkc
@@ -304,17 +373,17 @@ class Geo:
         R(5, g("RB_CH_D"), 1000 * tot / n, str(n), tot, [1000 * hkc, 1000 * hkc])
         # 6: thép chủ cổ móng
         ytb = self.ytop - k * c
-        ybb = self.ybase + k * cb + 2 * k * g("RB_BOT_D") / 1000.0
-        vert = (ytb - ybb) / k
+        vert = (ytb - self.pier_ybb()) / k
         n = NPIER * int(g("RC_N"))
-        R(6, g("RC_D"), 1000 * (vert + 0.3), f"{int(g('RC_N'))}x{NPIER}", n * (vert + 0.3), [300.0, 1000 * vert])
+        R(6, g("RC_D"), 1000 * (vert + ANCHOR), f"{int(g('RC_N'))}x{NPIER}", n * (vert + ANCHOR),
+          [1000 * ANCHOR, 1000 * vert])
         # 7: đai
         side = g("BB") - 2 * c
-        n7 = self.hoop_n(g("RT_S") / 1000.0)
+        n7 = len(self.hoop_ys())
         R(7, g("RT_D"), 1000 * (4 * side + 0.12), f"{n7}x{NPIER}", n7 * NPIER * (4 * side + 0.12), [60.0, 1000 * side])
         # 9: đai phụ thẳng; 10: đai bát giác
         grp, st = self.tie_plan()
-        n9 = self.hoop_n(g("RP_S") / 1000.0)
+        n9 = len(self.tie_ys())
         if st:
             n = n9 * 2 * len(st) * NPIER
             R(9, g("RP_D"), 1000 * (side + 0.12), f"{n9 * 2 * len(st)}x{NPIER}", n * (side + 0.12), [60.0, 1000 * side, 60.0])
@@ -338,6 +407,10 @@ class Geo:
         self.klb = {2: b2, 4: b4, 5: b5}
         self.seq = {r["pos"]: i for i, r in enumerate(rows, 1)}
         return rows
+
+    def dp(self) -> float:
+        """Hệ số dự phòng thép (1 + DP%)."""
+        return 1.0 + max(0.0, float(self.p.get("DP", 0) or 0)) / 100.0
 
     def sq(self, num) -> str:
         """Số vị trí hiển thị liên tục 1..n."""

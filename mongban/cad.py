@@ -54,7 +54,31 @@ def init_fonts():
         return
     import pathlib
     from ezdxf.fonts import fonts
-    fonts.font_manager.scan_folder(pathlib.Path(font_dir()))
+    fm = fonts.font_manager
+    fm.scan_folder(pathlib.Path(font_dir()))
+    # Chữ MTEXT của khung tên gọi font theo họ (\fRoboto Condensed|b1, \fRoboto SemiBold...): luôn dùng font tĩnh kèm
+    # chương trình. Font Roboto cài trên máy (bản variable, nét chồng nhau) vẽ ra chữ lỗi chấm trắng.
+    orig = fm.find_best_match
+    own = {(c, b): fm.get_font_face(f) for (c, b), f in {
+        (True, False): FONT_R, (True, True): FONT_B,
+        (False, False): "Roboto-Regular.ttf", (False, True): "Roboto-Bold.ttf"}.items()}
+
+    orig_name = fm.find_font_name
+
+    def roboto(family, weight):
+        f = str(family or "").lower()
+        if not f.startswith("roboto"):
+            return None
+        return own["condensed" in f, weight >= 600 or any(w in f for w in ("semibold", "bold", "black", "heavy"))]
+
+    def find_best_match(family="sans-serif", style="Regular", weight=400, width=5, italic=False):
+        return roboto(family, weight) or orig(family, style, weight, width, italic)
+
+    def find_font_name(font_face):                      # MTEXT nhiều định dạng tra font theo đường này
+        r = roboto(font_face.family, font_face.weight) if not font_face.filename else None
+        return r.filename if r else orig_name(font_face)
+    fm.find_best_match = find_best_match
+    fm.find_font_name = find_font_name
     _fonts_ready = True
 
 
@@ -313,6 +337,13 @@ class Ctx:
             h.paths.add_polyline_path([self.wp(*p) for p in hp], is_closed=True, flags=16)
         return h
 
+    def solid(self, lay, pts):
+        """Vùng tô đặc (hatch SOLID)."""
+        h = self.msp.add_hatch(color=7, dxfattribs={"layer": lay})
+        h.set_solid_fill(color=7)
+        h.paths.add_polyline_path([self.wp(*p) for p in pts], is_closed=True)
+        return h
+
     # --- chữ --------------------------------------------------------------
     def _text(self, lay, x, y, h, s, align, rot=0.0, bold=False, underline=False):
         top = self._stack[-1] if self._stack else "none"
@@ -365,7 +396,7 @@ class Ctx:
         return self._text(lay, x, y, h, s, a, **kw)
 
     # --- kích thước -------------------------------------------------------
-    def dim(self, lay, rot, p1, p2, pd, tp=None, dimname=None):
+    def dim(self, lay, rot, p1, p2, pd, tp=None, dimname=None, override=None, text="<>"):
         """Dim: điểm đo p1, p2 cố định theo hình; đường dim và chữ dịch theo item."""
         with self.item("dim", "Kích thước"):
             dxi, dyi = self.off(True)
@@ -393,7 +424,8 @@ class Ctx:
                 self.wp(pd[0] - 1, p1[1])
                 self.wp(pd[0] + 1, p2[1])
             d = self.msp.add_linear_dim(base=base, p1=a, p2=b, angle=rot, location=loc,
-                                        dimstyle=dimname or self.dimname, dxfattribs={"layer": lay})
+                                        dimstyle=dimname or self.dimname, override=override, text=text,
+                                        dxfattribs={"layer": lay})
             d.render()
         lw = LAYERS.get(lay, (0, 0, 18))[2]
         blk = self.doc.blocks.get(d.dimension.dxf.geometry)

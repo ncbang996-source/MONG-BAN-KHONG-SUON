@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
 
 # ô Excel -> thông số (giống mb:cfg-cells của MONG_BAN_KHONG_SUON.lsp)
 CELLS_NUM = {
@@ -20,8 +19,14 @@ CELLS_REBAR = {
 }
 CELLS_COVER = {"COVER_B": "K31", "COVER": "K32"}   # mm trong Excel -> m
 CELL_RLAYERS = "F38"                               # "02 lớp"
+CELL_DP = "C39"                                    # dự phòng thép (%)
 
-HT_NAMES = ["ĐỠ", "NÉO GÓC", "NÉO DỪNG"]
+HT_NAMES = ["ĐỠ", "NÉO GÓC", "NÉO DỪNG", "NÉO THẲNG", "NÉO HÃM", "NÉO GÓC"]   # thêm loại mới vào cuối (giữ số cũ); néo góc 90° (5): tên bản vẽ chỉ ghi "NÉO GÓC"
+HT_UI = ["Đỡ", "Néo góc", "Néo dừng", "Néo thẳng", "Néo hãm", "Néo góc 90°"]
+HT_ANGLE = (1, 4)            # hướng tuyến 2 tia lệch 10° + phân giác: néo góc, néo hãm
+HT_BISECT = (1, 3, 4)        # có mũi tên phân giác (sang trái): néo góc, néo thẳng, néo hãm
+HT_90 = 5                    # néo góc 90°: 2 mũi tên vuông góc - lên (+Y) và sang trái (−X), không phân giác
+HT_TIM_BR = (1, 3, 4, 5)     # mũi tên chiếm góc trên-trái -> ghi chú tim móng phía dưới bên phải
 SCALES = [25, 50, 75, 100, 150, 200, 250]
 SLOPE_DRAW = 0.5          # hệ số mở mái THỂ HIỆN trên bản vẽ (K27 chỉ dùng tính khối lượng)
 
@@ -46,6 +51,7 @@ def default_params() -> dict:
         "RT_D": 8.0, "RT_S": 200.0, "RP_D": 8.0, "RP_S": 400.0,
         "RL_D": 8.0, "RL_S": 100.0, "RL_N": 2.0,
         "COVER": 0.05, "COVER_B": 0.05,
+        "DP": 0.0,      # dự phòng thép (%), chỉ cộng vào bảng tổng kê và Excel khối lượng
         # khung tên
         "MABV": "2604HPLB.F.TR.C.02",
     }
@@ -58,37 +64,84 @@ def type_name(p: dict) -> str:
     return f"MB {f(p['L1'])}-{f(p['B'])}x{f(p['L'])}"
 
 
+# thông số giữ lại khi mở file Excel khác (Excel móng bản không có ô mã số bản vẽ khung tên)
+KEEP_KEYS = ("MABV",)
+
+
+def fresh_params(prev: dict | None = None) -> dict:
+    """Nền khi mở file Excel mới: thông số mặc định + KEEP_KEYS của lần trước (ô trống không giữ số file trước)."""
+    p = default_params()
+    if prev:
+        p.update({k: prev[k] for k in KEEP_KEYS if k in prev})
+    return p
+
+
 def ht_from_string(s: str) -> int:
     u = s.upper()
-    if "GÓC" in u or "GOC" in u:
-        return 1
     if "DỪNG" in u or "DUNG" in u:
         return 2
+    if "90" in u and ("GÓC" in u or "GOC" in u or "NÉO" in u or "NEO" in u):
+        return HT_90
+    if "THẲNG" in u or "THANG" in u:
+        return 3
+    if "HÃM" in u or "HAM" in u:
+        return 4
+    if "NÉO" in u or "NEO" in u or "GÓC" in u or "GOC" in u:
+        return 1
     return 0
 
 
-def read_excel(path: str, sheet: str = "TONG HOP", p: dict | None = None) -> tuple[dict, list[str]]:
-    """Đọc sheet TONG HOP. Trả về (thông số, danh sách cảnh báo)."""
-    import openpyxl
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
-    p = dict(p or default_params())
-    warn: list[str] = []
+
+def _open_sheet(path: str, sheet: str):
+    """Hàm đọc ô theo địa chỉ ("K7") của sheet; hỗ trợ .xlsx / .xlsm (openpyxl) và .xls (xlrd)."""
+    import re
+    if path.lower().endswith(".xls"):
+        import xlrd
+        wb = xlrd.open_workbook(path)
+        if sheet not in wb.sheet_names():
+            raise ValueError(f'Không tìm thấy sheet "{sheet}" trong file Excel.')
+        ws = wb.sheet_by_name(sheet)
+
+        def val(a):
+            m = re.fullmatch(r"([A-Z]+)(\d+)", a)
+            col = 0
+            for ch in m.group(1):
+                col = col * 26 + ord(ch) - 64
+            r, c = int(m.group(2)) - 1, col - 1
+            if r >= ws.nrows or c >= ws.ncols:
+                return None
+            cell = ws.cell(r, c)
+            if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK, xlrd.XL_CELL_ERROR):
+                return None
+            return cell.value
+        return val, lambda: None
+    import openpyxl
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     if sheet not in wb.sheetnames:
         raise ValueError(f'Không tìm thấy sheet "{sheet}" trong file Excel.')
     ws = wb[sheet]
-    val = lambda a: ws[a].value
+    return (lambda a: ws[a].value), wb.close
+
+
+def read_excel(path: str, sheet: str = "TONG HOP", p: dict | None = None) -> tuple[dict, list[str]]:
+    """Đọc sheet TONG HOP. Trả về (thông số, danh sách cảnh báo)."""
+    p = dict(p or default_params())
+    warn: list[str] = []
+    val, close = _open_sheet(path, sheet)
 
     nread = 0
     for k, a in CELLS_NUM.items():
         v = val(a)
-        if isinstance(v, (int, float)):
+        if _num(v):
             p[k] = float(v)
             nread += 1
         elif k == "HC" and v in (None, ""):
             p["HC"] = 0.0
         else:
-            warn.append(f"Ô {a} ({k}) không có số, giữ giá trị {p[k]}.")
+            warn.append(f"Ô {a} ({k}) không có số, giữ giá trị {p[k]:g}.")
     for k, a in CELLS_STR.items():
         v = val(a)
         if v not in (None, ""):
@@ -101,21 +154,26 @@ def read_excel(path: str, sheet: str = "TONG HOP", p: dict | None = None) -> tup
         p["BLN"] = bln
     for k, a in CELLS_REBAR.items():
         v = val(a)
-        if isinstance(v, (int, float)) and v > 0:
+        if _num(v) and v > 0:
             p[k] = float(v)
     for k, a in CELLS_COVER.items():
         v = val(a)
-        if isinstance(v, (int, float)) and v > 0:
+        if _num(v) and v > 0:
             p[k] = float(v) / 1000.0
     v = val(CELL_RLAYERS)
     if v not in (None, ""):
         try:
-            n = int(v) if isinstance(v, (int, float)) else int("".join(c for c in str(v) if c.isdigit()) or 0)
+            n = int(v) if _num(v) else int("".join(c for c in str(v) if c.isdigit()) or 0)
             if n > 0:
                 p["RL_N"] = float(n)
         except ValueError:
             pass
-    wb.close()
+    v = val(CELL_DP)
+    if _num(v) and v >= 0:
+        p["DP"] = float(v)
+    elif v not in (None, ""):
+        warn.append(f"Ô {CELL_DP} (dự phòng thép) không có số, giữ giá trị {p['DP']:g}%.")
+    close()
     if nread == 0:
         raise ValueError("Không đọc được số liệu nào từ sheet. Kiểm tra lại địa chỉ ô.")
     p["TENMONG"] = p.get("TENMONG", "")
@@ -162,17 +220,43 @@ def area_vai(p) -> float:
     return (l + 2 * mp + 2 * ls + 2 * fold + 1) * (b + 2 * mp + 2 * ls + 2 * fold + 1)
 
 
-def bolt_text(p, npier=4) -> str:
-    s = p["BLN"]
-    for i, c in enumerate(s):
-        if c == "M" and i + 1 < len(s) and s[i + 1].isdigit():
-            d = ""
-            for ch in s[i + 1:]:
-                if not ch.isdigit():
-                    break
-                d += ch
-            return f"{4 * npier}M{d}"
-    return s
+def bolt_dia(p) -> int:
+    import re
+    m = re.search(r"M\s*(\d+)", str(p.get("BLN", "")))
+    return int(m.group(1)) if m else 36
+
+
+# bảng bố trí bu lông neo móng: Ø -> (h: chiều cao bu lông nhô lên từ mặt cổ móng, t: nửa khoảng cách 2 bu lông) mm
+BOLT_TABLE = {36: (160, 125), 42: (180, 125), 48: (200, 125), 56: (200, 125), 64: (220, 200), 72: (250, 200),
+              80: (250, 200), 90: (270, 200)}
+BOLT_NAMES = ["BLN-M36-250", "BLN-M42-250", "BLN-M48-250", "BLN-M56", "BLN-M64", "BLN-M72", "BLN-M80", "BLN-M90"]
+
+
+def _bolt_row(p):
+    """Dòng bảng bu lông theo Ø (Ø không có trong bảng: dòng Ø lớn hơn gần nhất, quá bảng thì dòng cuối)."""
+    d = bolt_dia(p)
+    for k in sorted(BOLT_TABLE):
+        if k >= d:
+            return BOLT_TABLE[k]
+    return BOLT_TABLE[max(BOLT_TABLE)]
+
+
+def bolt_gap(p) -> float:
+    """Khoảng cách 2 bu lông 1 cụm (m) = 2t: số sau dấu '-' của 'M36-250', không có thì theo bảng bu lông."""
+    import re
+    m = re.search(r"M\s*\d+\s*-\s*(\d+)", str(p.get("BLN", "")))
+    if m:
+        return int(m.group(1)) / 1000.0
+    return 2 * _bolt_row(p)[1] / 1000.0
+
+
+def bolt_h(p) -> float:
+    """Chiều cao bu lông neo nhô lên từ mặt cổ móng (m), theo bảng bu lông."""
+    return _bolt_row(p)[0] / 1000.0
+
+
+def bolt_text(p) -> str:
+    return f"{4 * 4}M{bolt_dia(p)}"
 
 
 def validate(p) -> str | None:
@@ -206,7 +290,31 @@ def validate(p) -> str | None:
         return "Số lớp lưới thép đầu trụ phải >= 1."
     if p["COVER"] < 0 or p["COVER_B"] < 0:
         return "Lớp BT bảo vệ không được âm."
+    if p.get("DP", 0) < 0:
+        return "Dự phòng thép không được âm."
     return None
+
+
+GAP_MIN = 0.04      # khoảng hở ngang tối thiểu giữa các thanh thép chủ (m)
+
+
+def warnings(p) -> list:
+    """Cảnh báo (không chặn dựng bản vẽ)."""
+    out = []
+    try:
+        m = 1 + int(round(p["RC_N"])) // 4
+        d = p["RC_D"] / 1000.0
+        xi = p["BB"] / 2 - p["COVER"] - d / 2
+        if m > 1:
+            gap = 2 * xi / (m - 1) - d
+            if gap < GAP_MIN - 1e-9:
+                out.append(f"Khoảng hở thép chủ cổ móng {gap * 1000:.0f} mm < {GAP_MIN * 1000:.0f} mm.")
+        bg = bolt_gap(p)
+        if bg > p["BB"] - 0.1:
+            out.append(f"Cụm bu lông {bg * 1000:.0f} mm gần sát mép cổ móng {p['BB'] * 1000:.0f} mm.")
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        pass
+    return out
 
 
 def auto_scale(p) -> int:
@@ -219,5 +327,11 @@ def auto_scale(p) -> int:
     return SCALES[-1]
 
 
+def is_tkkt(p) -> bool:
+    return "TKKT" in str(p.get("GD", "")).upper()
+
+
 def is_detail(p) -> bool:
-    return "BVTC" in str(p.get("GD", "")).upper()
+    """Có tờ cốt thép (tờ 2): TKBVTC và TKKT. TKKT không có bảng thống kê thép, tag không ghi số hiệu."""
+    gd = str(p.get("GD", "")).upper()
+    return "BVTC" in gd or "TKKT" in gd
