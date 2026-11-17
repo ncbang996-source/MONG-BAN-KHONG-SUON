@@ -1,4 +1,4 @@
-"""VẼ MÓNG BẢN - app vẽ nhanh bản vẽ móng bản (móng cột đường dây) từ file Excel, xuất PDF / DXF.
+"""VẼ MÓNG BẢN KHÔNG SƯỜN - app vẽ nhanh bản vẽ móng bản (móng cột đường dây) từ file Excel, xuất PDF / DXF.
 
 Chạy:  python app.py
 """
@@ -7,16 +7,20 @@ from __future__ import annotations
 import copy
 import json
 import os
+import queue
 import sys
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 import traceback
 from tkinter import filedialog, messagebox, ttk
 
-from mongban import _meta, cad, export, frame, kl_excel, model
+from mongban import __version__, _meta, batch, cad, export, frame, model
+from mongban.ui3d import View3D
 
 APP_NAME = "VE_MONGBANKOSUON"
-APP_VER = "1.2.0"
+APP_VER = __version__
+APP_DESC = "Móng bản không sườn (4 cổ móng) dùng cho cột đường dây cao thế bằng thép hình."
 
 
 def settings_path():
@@ -86,38 +90,97 @@ DIM_FIELDS = [
     ("HC", "Dày đệm cát (m)"), ("SLOPE", "Hệ số mở mái (tính KL)"),
     ("MPIT", "Mở rộng đáy hố đào (m)"),
 ]
+# (nhãn, khoá Ø, khoá bước)
 REBAR_FIELDS = [
-    ("Lớp dưới bản móng", "RB_BOT_D", "RB_BOT_S"), ("Lớp trên bản móng", "RB_TOP_D", "RB_TOP_S"),
-    ("Thép chống", "RB_CH_D", "RB_CH_S"), ("Đai cổ móng", "RT_D", "RT_S"),
-    ("Đai phụ", "RP_D", "RP_S"), ("Lưới đầu trụ", "RL_D", "RL_S"),
+    ("Thép bản móng - lớp dưới", "RB_BOT_D", "RB_BOT_S"), ("Thép bản móng - lớp trên", "RB_TOP_D", "RB_TOP_S"),
+    ("Thanh chống", "RB_CH_D", "RB_CH_S"), ("Đai cổ móng", "RT_D", "RT_S"),
+    ("Đai phụ cổ móng", "RP_D", "RP_S"), ("Lưới đầu trụ", "RL_D", "RL_S"),
 ]
 STAGES = ["TKCS", "TKBVTC", "TKKT"]
-
-# bảng màu giao diện
+# bảng màu giao diện - cảm hứng Yamaha XSR155: bình xăng bạc, yên da nâu, khung đen nhám, đèn hậu đỏ
+# (tên khoá giữ nguyên để các màn hình khác dùng chung: navy = đen nhám, blue = nâu da, green = xám than)
 C = {
-    "navy": "#1F3A5F", "blue": "#2E75B6", "green": "#2E8B57", "orange": "#F28C28", "red": "#C62828",
-    "bg": "#EEF3F9", "bar": "#E2EBF6", "card": "#FFFFFF", "line": "#C3D2E4", "text": "#1E2A38",
-    "muted": "#5B6B80", "stage": "#3C4B5C",
-    "sections": ["#2E75B6", "#138D90", "#D9822B", "#7B5EA7", "#2E8B57"],
+    "navy": "#0E1E3E", "blue": "#8B5A33", "green": "#1A3263", "orange": "#C98F5A", "red": "#C8202B",
+    "bg": "#E3E5E8", "bar": "#D3D6DA", "card": "#F7F7F8", "line": "#B3B7BD", "text": "#0E1E3E",
+    "muted": "#5F646B", "stage": "#14264A",
+    "silver": "#C4C7CC", "chrome": "#E9EAEC", "stitch": "#D9A56B", "seat": "#6B4423",
+    "sections": ["#7A4B28", "#1A3263", "#946036", "#284777", "#6B4423"],
 }
+
+
+class Tip:
+    """Chú giải khi rê chuột (kiểu AutoCAD): tên đầy đủ (đậm) + mô tả ngắn."""
+
+    def __init__(self, w, title, desc="", delay=500):
+        self.w, self.title, self.desc, self.delay, self._job, self._tw = w, title, desc, delay, None, None
+        w.bind("<Enter>", self._enter, add="+")
+        w.bind("<Leave>", self._hide, add="+")
+        w.bind("<ButtonPress>", self._hide, add="+")
+        w.bind("<Destroy>", self._hide, add="+")
+
+    def _enter(self, e=None):
+        self._hide()
+        self._job = self.w.after(self.delay, self._show)
+
+    def _show(self):
+        self._job = None
+        try:
+            x, y = self.w.winfo_rootx() + 8, self.w.winfo_rooty() + self.w.winfo_height() + 4
+            tw = tk.Toplevel(self.w)
+            tw.wm_overrideredirect(True)
+            tw.attributes("-topmost", True)
+            fr = tk.Frame(tw, background="#FFFFFF", highlightbackground="#7A8296", highlightthickness=1, padx=8, pady=5)
+            fr.pack()
+            f = tkfont.nametofont("TkDefaultFont")
+            tk.Label(fr, text=self.title, background="#FFFFFF", foreground=C["navy"], anchor="w", justify="left",
+                     font=(f.actual("family"), f.actual("size"), "bold")).pack(anchor="w")
+            if self.desc:
+                tk.Label(fr, text=self.desc, background="#FFFFFF", foreground="#333333", anchor="w", justify="left",
+                         wraplength=340, font=f).pack(anchor="w", pady=(2, 0))
+            tw.wm_geometry(f"+{x}+{y}")
+            self._tw = tw
+        except tk.TclError:
+            self._tw = None
+
+    def _hide(self, e=None):
+        if self._job:
+            try:
+                self.w.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+        if self._tw is not None:
+            try:
+                self._tw.destroy()
+            except tk.TclError:
+                pass
+            self._tw = None
 
 
 class App(tk.Tk):
     def __init__(self):
+        if sys.platform == "win32":
+            try:                                   # thanh taskbar dùng icon của app (không gộp với python / Tk)
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SEIAC.VE_MONGBANKOSUON")
+            except Exception:
+                pass
         super().__init__()
         self.title(f"{APP_NAME} {APP_VER}")
         try:
             ico = os.path.join(cad.resource_dir(), "icon.ico")
             if sys.platform == "win32":
-                self.iconbitmap(ico)
-            else:
-                from PIL import Image, ImageTk
-                self._ico = ImageTk.PhotoImage(Image.open(ico))
-                self.iconphoto(True, self._ico)
+                self.iconbitmap(default=ico)       # mọi cửa sổ (kể cả hộp thoại)
+            from PIL import Image, ImageTk
+            im = Image.open(os.path.join(cad.resource_dir(), "icon.png")).convert("RGBA")
+            # icon lớn + nhỏ (taskbar / thanh tiêu đề) cho mọi cửa sổ
+            self._icos = [ImageTk.PhotoImage(im.resize((n, n), Image.LANCZOS)) for n in (256, 64, 48, 32, 16)]
+            self.iconphoto(True, *self._icos)
         except Exception:
             pass
-        self.geometry("1400x860")
-        self.minsize(1100, 700)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{min(1400, sw - 40)}x{min(860, sh - 80)}")
+        self.minsize(min(1100, sw - 40), min(700, sh - 80))
         self.st = load_settings()
         self.p = model.default_params()
         self.p.update({k: v for k, v in self.st.get("params", {}).items() if k in self.p})
@@ -126,6 +189,10 @@ class App(tk.Tk):
         if self.frame_path and not os.path.isfile(self.frame_path):
             self.frame_path = default_frame()
         self.fields = copy.deepcopy(self.st.get("fields") or frame.DEFAULT_FIELDS)
+        pj = self.st.get("project") or {}               # dự án đã mở lần trước (danh sách file Excel móng)
+        self.project = [f for f in (pj.get("files") or []) if isinstance(f, str) and os.path.isfile(f)]
+        self.proj_i = max(0, min(int(pj.get("i") or 0), len(self.project) - 1))
+        self.project_file = pj.get("file") if isinstance(pj.get("file"), str) and os.path.isfile(pj.get("file")) else ""
         self.vars: dict[str, tk.Variable] = {}
         self.pdf = None
         self.pages = []          # ảnh PIL từng trang
@@ -133,14 +200,24 @@ class App(tk.Tk):
         self.zoom = None         # None = vừa khung
         self.busy = False
         self.dirty = True
+        self.ver = 0             # phiên bản số liệu: tăng mỗi lần sửa ô / dịch chuyển / đổi khung tên
         self.offsets: dict = load_layout(self.xls)   # dịch chuyển đã lưu {id: [dx, dy]} (mm giấy)
         self.pending: dict = {}      # dịch chuyển chưa dựng lại
         self._drag = None
         self._geom = None
+        self._undo: list = []        # Ctrl+Z / Ctrl+Y khi sắp xếp
+        self._redo: list = []
         self._job = None
+        self._info_job = None        # trễ thông báo lỗi khi đang gõ
+        self._kjob = None            # gom các lần nhấn phím mũi tên thành 1 lần dựng lại / 1 lần hoàn tác
         self._build_ui()
         self._fill()
+        self._proj_refresh()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        for k in ("<Control-z>", "<Control-Z>"):
+            self.bind_all(k, lambda e: self._undo_redo(True))
+        for k in ("<Control-y>", "<Control-Y>"):
+            self.bind_all(k, lambda e: self._undo_redo(False))
         if self.xls and os.path.isfile(self.xls) and not self.st.get("params"):
             self.after(200, lambda: self.read_excel(self.xls))
         else:
@@ -168,16 +245,17 @@ class App(tk.Tk):
         st.configure("Info2.TLabel", background=C["card"], foreground=C["blue"], font=fb)
         st.configure("Err.TLabel", background=C["card"], foreground=C["red"])
         st.configure("Sub.TLabel", background=C["card"], foreground=C["muted"])
-        for nm, bg, fg, hov in (("Tool", "#FFFFFF", C["navy"], "#DCE9F7"),
-                                ("Primary", C["blue"], "#FFFFFF", "#245E93"),
-                                ("Export", C["green"], "#FFFFFF", "#22704A"),
-                                ("Small", C["bar"], C["navy"], "#C9DAEE")):
-            st.configure(f"{nm}.TButton", background=bg, foreground=fg, bordercolor=C["line"],
+        for nm, bg, fg, hov in (("Tool", C["chrome"], C["navy"], "#F6F6F7"),
+                                ("Primary", C["blue"], "#FFFFFF", "#6E4222"),
+                                ("Export", C["green"], "#F1F2F3", C["blue"]),
+                                ("Small", C["bar"], C["navy"], "#C2C6CB")):
+            st.configure(f"{nm}.TButton", background=bg, foreground=fg, bordercolor=C["silver"] if nm == "Tool" else (C["seat"] if nm == "Primary" else C["line"]),
                          lightcolor=bg, darkcolor=bg, focuscolor=bg, padding=(10, 5) if nm != "Small" else (6, 2),
                          font=fb if nm in ("Primary", "Export") else f, relief="flat")
             st.map(f"{nm}.TButton", background=[("pressed", hov), ("active", hov)],
                    lightcolor=[("active", hov)], darkcolor=[("active", hov)])
-        st.configure("TEntry", fieldbackground="#FFFFFF", bordercolor=C["line"], lightcolor=C["line"], padding=3)
+        st.configure("TEntry", fieldbackground="#FFFFFF", bordercolor=C["line"], lightcolor=C["line"], padding=3,
+                     selectbackground=C["blue"], selectforeground="#FFFFFF")
         st.map("TEntry", bordercolor=[("focus", C["blue"])], lightcolor=[("focus", C["blue"])])
         st.configure("TCombobox", fieldbackground="#FFFFFF", bordercolor=C["line"], lightcolor=C["line"],
                      arrowcolor=C["blue"], padding=2)
@@ -185,6 +263,13 @@ class App(tk.Tk):
         st.configure("Vertical.TScrollbar", background=C["bar"], troughcolor=C["bg"], bordercolor=C["bg"],
                      arrowcolor=C["blue"])
         st.configure("TPanedwindow", background=C["bg"])
+        st.configure("TNotebook", background=C["card"], bordercolor=C["line"], tabmargins=(6, 6, 6, 0))
+        st.configure("TNotebook.Tab", background=C["bar"], foreground=C["muted"], padding=(10, 4), font=fb,
+                     bordercolor=C["line"])
+        st.map("TNotebook.Tab", background=[("selected", C["card"]), ("active", C["chrome"])],
+               foreground=[("selected", C["blue"])])
+        st.configure("TRadiobutton", background=C["card"])
+        st.configure("TCheckbutton", background=C["card"])
         return f, fb
 
     def _build_ui(self):
@@ -204,44 +289,132 @@ class App(tk.Tk):
         tt.pack(side="left", pady=4)
         tk.Label(tt, text=APP_NAME, background=C["navy"], foreground="#FFFFFF",
                  font=(f[0], f[1] + 5, "bold")).pack(anchor="w")
-        tk.Label(tt, text="Vẽ móng bản không sườn  •  Excel → PDF / AutoCAD DXF / Excel khối lượng",
-                 background=C["navy"], foreground="#A9C7EA", font=(f[0], f[1] - 1)).pack(anchor="w")
-        tk.Label(hdr, text=f"phiên bản {APP_VER}", background=C["navy"], foreground="#7FA3CC",
+        tk.Label(tt, text=f"{APP_DESC}  •  Excel → PDF / AutoCAD DXF / Excel khối lượng / IFC",
+                 background=C["navy"], foreground=C["silver"], font=(f[0], f[1] - 1)).pack(anchor="w")
+        tk.Label(hdr, text=f"phiên bản {APP_VER}", background=C["navy"], foreground="#9A9EA5",
                  font=(f[0], f[1] - 1)).pack(side="right", padx=14)
-        tk.Frame(self, background=C["orange"], height=3).pack(side="top", fill="x")
+        # đường may chỉ nổi trên yên da nâu
+        stitch = tk.Canvas(self, height=6, background=C["seat"], highlightthickness=0)
+        stitch.pack(side="top", fill="x")
+        stitch.bind("<Configure>", lambda e: (stitch.delete("all"),
+                                              stitch.create_line(0, 3, e.width, 3, fill=C["stitch"], dash=(7, 4), width=2)))
 
         # thanh công cụ chia nhóm
-        bar = ttk.Frame(self, style="Bar.TFrame", padding=(8, 4, 8, 6))
+        bar = ttk.Frame(self, style="Bar.TFrame", height=70)
         bar.pack(side="top", fill="x")
+        bar.pack_propagate(False)
+
+        groups = []
 
         def group(title):
             g = ttk.Frame(bar, style="Bar.TFrame")
-            g.pack(side="left", padx=(0, 14))
+            groups.append(g)
             ttk.Label(g, text=title.upper(), style="Bar.TLabel").pack(anchor="w")
             row = ttk.Frame(g, style="Bar.TFrame")
             row.pack(anchor="w")
             return row
 
-        def btn(parent, t, cmd, sty="Tool"):
-            ttk.Button(parent, text=t, command=cmd, style=f"{sty}.TButton").pack(side="left", padx=(0, 4))
+        def btn(parent, t, cmd, sty="Tool", tip=None):
+            b = ttk.Button(parent, text=t, command=cmd, style=f"{sty}.TButton")
+            b.pack(side="left", padx=(0, 4))
+            if tip:
+                Tip(b, *tip)
+            return b
 
         g1 = group("Dữ liệu")
-        btn(g1, "Mở Excel...", self.pick_excel)
-        btn(g1, "⟳ Đọc lại", lambda: self.read_excel(self.xls))
+        btn(g1, "Mở Excel…", self.pick_excel, tip=("Mở file Excel móng", "Chọn file Excel móng (sheet TONG HOP) để đọc số liệu và vẽ bản vẽ."))
+        btn(g1, "⟳ Đọc lại", lambda: self.read_excel(self.xls), tip=("Đọc lại file Excel", "Đọc lại số liệu từ file Excel đang mở (sau khi sửa file Excel)."))
+        self.m_prj = tk.Menu(self, tearoff=0, background=C["card"], foreground=C["text"], font=f,
+                             activebackground=C["green"], activeforeground="#FFFFFF")
+        for it in (("Tạo dự án từ nhiều file Excel móng...", self.new_project),
+                   ("Mở file dự án (*.mongban)...", self.open_project_file), None,
+                   ("Lưu dự án", self.save_project), ("Lưu dự án thành... (file *.mongban)", self.save_project_as),
+                   None, ("Đóng dự án", self.close_project)):
+            if it is None:
+                self.m_prj.add_separator()
+            else:
+                self.m_prj.add_command(label=it[0], command=it[1])
+        self.b_prj = ttk.Button(g1, text="Dự án ▾", style="Tool.TButton",
+                                command=lambda: self.m_prj.tk_popup(self.b_prj.winfo_rootx(),
+                                                                    self.b_prj.winfo_rooty() + self.b_prj.winfo_height()))
+        self.b_prj.pack(side="left", padx=(0, 4))
+        Tip(self.b_prj, "Dự án (nhiều móng)", "Tạo, mở, lưu dự án gồm nhiều file Excel móng (file *.mongban); chọn từng móng để xem.")
+        btn(g1, "Thư mục…", lambda: BatchDialog(self), tip=("Thư mục dự án", "Liệt kê các file Excel móng trong một thư mục: mở từng file, nhập vào dự án, xuất đồng loạt."))
         g2 = group("Khung tên")
-        btn(g2, "Nạp khung tên...", self.pick_frame)
-        btn(g2, "⚙ Cấu hình...", self.edit_fields)
+        btn(g2, "Khung tên…", self.pick_frame, tip=("Nạp khung tên", "Chọn file DXF khung tên (khung bản vẽ) dùng cho các tờ."))
+        btn(g2, "⚙ Cấu hình…", self.edit_fields, tip=("Cấu hình khung tên", "Vị trí, cỡ chữ các ô điền trong khung tên (tên bản vẽ, tỷ lệ, tờ, mã số) và logo."))
         g3 = group("Xem")
-        btn(g3, "▶  Xem trước", self.preview, "Primary")
+        btn(g3, "▶  Xem trước", self.preview, "Primary", tip=("Xem trước bản in", "Dựng lại bản vẽ từ số liệu hiện tại và xem trước các tờ."))
         self.v_auto = tk.BooleanVar(value=self.st.get("auto", True))
-        ttk.Checkbutton(g3, text="Tự cập nhật", variable=self.v_auto, style="Bar.TCheckbutton").pack(side="left", padx=6)
+        cb = ttk.Checkbutton(g3, text="Tự cập nhật", variable=self.v_auto, style="Bar.TCheckbutton")
+        cb.pack(side="left", padx=6)
+        Tip(cb, "Tự cập nhật", "Tự dựng lại bản vẽ sau khi sửa số liệu (chờ khoảng 1 giây sau lần gõ cuối).")
         self.v_arr = tk.BooleanVar(value=False)
-        ttk.Checkbutton(g3, text="Sắp xếp (kéo thả)", variable=self.v_arr, style="Bar.TCheckbutton",
-                        command=self._redraw).pack(side="left", padx=(0, 6))
+        cb = ttk.Checkbutton(g3, text="Sắp xếp", variable=self.v_arr, style="Bar.TCheckbutton", command=self._redraw)
+        cb.pack(side="left", padx=(0, 6))
+        Tip(cb, "Sắp xếp bản vẽ", "Kéo thả hoặc nhấp rồi dùng phím mũi tên để dịch chuyển chữ, kích thước, ký hiệu; "
+                                  "Ctrl + nhấp: chọn nhiều; chuột phải: về vị trí mặc định.")
         g4 = group("Xuất")
-        btn(g4, "PDF", self.export_pdf, "Export")
-        btn(g4, "AutoCAD DXF", self.export_dxf, "Export")
-        btn(g4, "Excel khối lượng", self.export_xlsx, "Export")
+        # các lựa chọn xuất gom thành 1 menu sổ xuống
+        self.m_exp = tk.Menu(self, tearoff=0, background=C["card"], foreground=C["text"], font=f,
+                             activebackground=C["green"], activeforeground="#FFFFFF")
+        for lbl, cmd in (("PDF bản vẽ...", self.export_pdf), ("AutoCAD DXF...", self.export_dxf),
+                         ("Excel khối lượng...", self.export_xlsx), ("Mô hình IFC (BIM)...", self.export_ifc)):
+            self.m_exp.add_command(label=lbl, command=cmd)
+        self.m_exp.add_separator()
+        self.m_exp.add_command(label="Tất cả (chọn loại file)...", command=self.export_all)
+        self.m_exp.add_command(label="Xuất đồng loạt (dự án / thư mục)...", command=self.export_batch)
+        self.b_exp = ttk.Button(g4, text="⭳  Xuất file  ▾", style="Export.TButton",
+                                command=lambda: self.m_exp.tk_popup(self.b_exp.winfo_rootx(),
+                                                                    self.b_exp.winfo_rooty() + self.b_exp.winfo_height()))
+        self.b_exp.pack(side="left")
+        Tip(self.b_exp, "Xuất file", "PDF bản vẽ, AutoCAD DXF, Excel khối lượng, mô hình IFC, hoặc xuất đồng loạt cho dự án / thư mục.")
+
+        def flow(e=None):
+            """Màn hình hẹp: các nhóm nút tự xuống dòng (không bị khuất)."""
+            wmax = max(200, bar.winfo_width() - 16)
+            x = y = hrow = 0
+            for g in groups:
+                w, h = g.winfo_reqwidth(), g.winfo_reqheight()
+                if x > 0 and x + w > wmax:
+                    x, y, hrow = 0, y + hrow + 4, 0
+                g.place(x=8 + x, y=4 + y)
+                x += w + 14
+                hrow = max(hrow, h)
+            hb = y + hrow + 10
+            if abs(bar.winfo_height() - hb) > 1:
+                bar.configure(height=hb)
+        bar.bind("<Configure>", flow)
+        self.after(50, flow)
+
+        # thanh dự án (chỉ hiện khi đã mở dự án): chọn từng móng để xem, xuất đồng loạt
+        pj = tk.Frame(self, background=C["green"], padx=10, pady=4)
+        self._proj_bar = pj
+        tk.Label(pj, text="DỰ ÁN", background=C["green"], foreground=C["stitch"],
+                 font=(f[0], f[1], "bold")).pack(side="left", padx=(0, 8))
+        self.v_proj = tk.StringVar()
+        self.cb_proj = ttk.Combobox(pj, textvariable=self.v_proj, state="readonly", width=60)
+        self.cb_proj.pack(side="left")
+        self.cb_proj.bind("<<ComboboxSelected>>", lambda e: self.proj_go(self.cb_proj.current()))
+        for t, d, tt in (("◀", -1, "Móng trước"), ("▶", 1, "Móng sau")):
+            b = ttk.Button(pj, text=t, width=3, style="Small.TButton", command=lambda d=d: self.proj_go(self.proj_i + d))
+            b.pack(side="left", padx=(4, 0))
+            Tip(b, tt, "Chuyển sang móng " + ("trước" if d < 0 else "sau") + " trong dự án.")
+        self.l_proj = tk.Label(pj, text="", background=C["green"], foreground="#FFFFFF", font=f)
+        self.l_proj.pack(side="left", padx=8)
+        for t, cmd, tt, dsc in (("Đóng", self.close_project, "Đóng dự án", "Đóng dự án (dự án đã lưu được tự lưu trước khi đóng)."),
+                                ("Lưu", self.save_project, "Lưu dự án", "Lưu dự án vào file *.mongban (chưa có file: hỏi tên)."),
+                                ):
+            b = ttk.Button(pj, text=t, style="Small.TButton", command=cmd)
+            b.pack(side="right", padx=(0, 6) if t == "Đóng" else 6)
+            Tip(b, tt, dsc)
+        self.l_pfile = tk.Label(pj, text="", background=C["green"], foreground=C["stitch"], font=f)
+        self.l_pfile.pack(side="right", padx=6)
+        for t, cmd, tt, dsc in (("− Bớt", self.remove_from_project, "Bớt móng khỏi dự án", "Bớt móng đang xem khỏi dự án (file Excel không bị xoá)."),
+                                ("+ Thêm…", self.add_to_project, "Thêm móng vào dự án", "Chọn thêm file Excel móng vào dự án.")):
+            b = ttk.Button(pj, text=t, style="Small.TButton", command=cmd)
+            b.pack(side="right", padx=(0, 6) if t.startswith("−") else 0)
+            Tip(b, tt, dsc)
 
         info = ttk.Frame(self, style="Bg.TFrame", padding=(10, 3))
         info.pack(side="top", fill="x")
@@ -249,6 +422,11 @@ class App(tk.Tk):
         self.l_xls.pack(side="left")
         self.l_frame = ttk.Label(info, text="", style="Info.TLabel")
         self.l_frame.pack(side="right")
+        # lỗi / cảnh báo số liệu: dải đỏ ngay dưới thanh thông tin, chỉ hiện khi có nội dung
+        self._info_bar = info
+        f = self._f
+        self.l_err = tk.Label(self, text="", background="#FDECEA", foreground=C["red"], anchor="w",
+                              justify="left", padx=12, pady=3, font=(f[0], f[1], "bold"))
 
         pw = ttk.PanedWindow(self, orient="horizontal")
         pw.pack(fill="both", expand=True, padx=8, pady=(0, 6))
@@ -258,7 +436,7 @@ class App(tk.Tk):
         pw.add(right, weight=1)
 
         # khung trái cuộn được
-        cv = tk.Canvas(left, width=440, highlightthickness=0, background=C["card"])
+        cv = tk.Canvas(left, width=590, highlightthickness=0, background=C["card"])
         sb = ttk.Scrollbar(left, orient="vertical", command=cv.yview)
         body = ttk.Frame(cv, padding=(6, 4, 10, 10))
         body.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
@@ -267,12 +445,24 @@ class App(tk.Tk):
         cv.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         self._scroll_left = cv
-        cv.bind("<Enter>", lambda e: cv.bind_all("<MouseWheel>", self._wheel_left))
-        cv.bind("<Leave>", lambda e: cv.unbind_all("<MouseWheel>"))
+        # con lăn: 1 bộ xử lý chung, chọn khung theo vị trí con trỏ (không phụ thuộc Enter/Leave)
+        self.bind_all("<MouseWheel>", self._wheel_any)
+        self.bind_all("<Button-4>", lambda e: self._wheel_any(e, 120))
+        self.bind_all("<Button-5>", lambda e: self._wheel_any(e, -120))
+        # Combobox không tự đổi giá trị khi lăn qua -> cuộn khung thông số
+        for ev, dl in (("<MouseWheel>", None), ("<Button-4>", 120), ("<Button-5>", -120)):
+            self.bind_class("TCombobox", ev, lambda e, dl=dl: (self._wheel_any(e, dl), "break")[1])
         self._form(body)
 
-        # xem trước
-        top = ttk.Frame(right, padding=(8, 6))
+        # xem trước: tab bản in + tab mô hình 3D
+        self.nb = ttk.Notebook(right)
+        self.nb.pack(fill="both", expand=True)
+        tab1 = ttk.Frame(self.nb)
+        self.v3d = View3D(self.nb, APP_NAME, C)
+        self.nb.add(tab1, text="  Bản in (PDF)  ")
+        self.nb.add(self.v3d, text="  Mô hình 3D  ")
+        self.nb.bind("<<NotebookTabChanged>>", lambda e: self.v3d.refresh() if self.nb.index("current") == 1 else None)
+        top = ttk.Frame(tab1, padding=(8, 6))
         top.pack(side="top", fill="x")
         ttk.Label(top, text="XEM TRƯỚC BẢN IN", style="Info2.TLabel").pack(side="left", padx=(0, 12))
         self.v_page = tk.StringVar(value="Tờ 1")
@@ -284,32 +474,60 @@ class App(tk.Tk):
         ttk.Button(top, text="−", width=3, command=lambda: self.zoom_by(0.8), style="Small.TButton").pack(side="left", padx=(2, 0))
         self.l_state = ttk.Label(top, text="", style="Sub.TLabel")
         self.l_state.pack(side="left", padx=10)
-        self.pv = tk.Canvas(right, background=C["stage"], highlightthickness=0)
+        self.pv = tk.Canvas(tab1, background=C["stage"], highlightthickness=0)
         self.pv.pack(fill="both", expand=True)
         self.pv.bind("<Configure>", lambda e: self._redraw())
         self.pv.bind("<ButtonPress-1>", self._press)
         self.pv.bind("<B1-Motion>", self._motion)
         self.pv.bind("<ButtonRelease-1>", self._release)
         self.pv.bind("<ButtonPress-2>", lambda e: self.pv.scan_mark(e.x, e.y))
-        self.pv.bind("<B2-Motion>", lambda e: self.pv.scan_dragto(e.x, e.y, gain=1))
+        self.pv.bind("<B2-Motion>", lambda e: (self.pv.scan_dragto(e.x, e.y, gain=1),
+                                              None if self._view_covered() else self._paint(fast=True)))
+        self.pv.bind("<ButtonRelease-2>", lambda e: self._paint_later(60))
+        self.bind("<Escape>", lambda e: (setattr(self, "_sel", []), self._overlay()))
+        # sắp xếp: phím mũi tên dịch đối tượng đang chọn 1 mm (Shift: 5 mm) trên giấy
+        for k, d in (("<Left>", (-1, 0)), ("<Right>", (1, 0)), ("<Up>", (0, 1)), ("<Down>", (0, -1))):
+            self.pv.bind(k, lambda e, d=d: self._key_move(e, *d))
+            self.pv.bind("<Shift-" + k[1:], lambda e, d=d: self._key_move(e, *d))
         self.pv.bind("<ButtonPress-3>", self._context)
         self.pv.bind("<Motion>", self._hover)
-        self.pv.bind("<MouseWheel>", self._wheel_zoom)
-        self.pv.bind("<Button-4>", lambda e: self.zoom_by(1.15))
-        self.pv.bind("<Button-5>", lambda e: self.zoom_by(1 / 1.15))
+
 
         st = tk.Frame(self, background=C["navy"])
         st.pack(side="bottom", fill="x", before=pw)
-        self._cr = tk.Label(st, text=_meta.credit(), background=C["navy"], foreground="#F2B36B",
+        self._cr = tk.Label(st, text=_meta.credit(), background=C["navy"], foreground=C["stitch"],
                             font=(f[0], f[1] - 1, "bold"), padx=10, pady=3)
         self._cr.pack(side="left")
-        tk.Frame(st, background="#3E5C82", width=1).pack(side="left", fill="y", pady=3)
-        self.l_msg = tk.Label(st, text="", background=C["navy"], foreground="#E3ECF7", anchor="w",
+        tk.Frame(st, background="#2E4570", width=1).pack(side="left", fill="y", pady=3)
+        self.l_msg = tk.Label(st, text=APP_DESC, background=C["navy"], foreground="#D6D8DC", anchor="w",
                               font=(f[0], f[1] - 1), padx=10, pady=3)
         self.l_msg.pack(side="left", fill="x")
 
-    def _wheel_left(self, e):
-        self._scroll_left.yview_scroll(int(-e.delta / 120), "units")
+    def _inside(self, w, root):
+        while w is not None:
+            if w == root:
+                return True
+            w = getattr(w, "master", None)
+        return False
+
+    def _wheel_any(self, e, delta=None):
+        delta = e.delta if delta is None else delta
+        if not delta:
+            return
+        try:
+            w = self.winfo_containing(e.x_root, e.y_root)
+        except (KeyError, tk.TclError):
+            return
+        if w is None:
+            return
+        if self._inside(w, self.pv):
+            self.zoom_by(1.15 if delta > 0 else 1 / 1.15, e)
+        elif self._inside(w, self.v3d.cv):
+            self.v3d.wheel(e, delta)
+        elif self._inside(w, self._scroll_left.master):
+            step = -1 if delta > 0 else 1
+            n = max(1, abs(int(delta / 120)))
+            self._scroll_left.yview_scroll(step * n, "units")
 
     def _var(self, key, kind="s"):
         v = tk.StringVar()
@@ -330,6 +548,7 @@ class App(tk.Tk):
             tk.Label(h, text=t.upper(), background=col, foreground="#FFFFFF",
                      font=(self._f[0], self._f[1], "bold"), padx=8, pady=3).pack(side="left")
             r += 1
+            return h, col
 
         def row(lbl, key, w=12, values=None):
             nonlocal r
@@ -343,7 +562,7 @@ class App(tk.Tk):
             return e
 
         head("1. Thông tin chung")
-        row("Hình thức cột", "HT", 16, values=["Đỡ", "Néo góc", "Néo dừng"])
+        row("Hình thức cột", "HT", 16, values=model.HT_UI)
         row("Loại cột", "COT", 16)
         row("Tên móng (trống = tự đặt)", "TENMONG", 20)
         row("Giai đoạn thiết kế", "GD", 12, values=STAGES)
@@ -351,17 +570,18 @@ class App(tk.Tk):
         row("Mã số bản vẽ (khung tên)", "MABV", 26)
         row("Bê tông móng", "BTM", 8)
         row("Bê tông lót", "BTL", 8)
-        row("Bu lông neo", "BLN", 16)
+        row("Bu lông neo", "BLN", 16, values=model.BOLT_NAMES)
         head("2. Kích thước")
         for k, lbl in DIM_FIELDS:
             row(lbl, k, 8)
         head("3. Cốt thép (mm)")
         ttk.Label(body, text="Ø").grid(row=r, column=1, sticky="w")
-        ttk.Label(body, text="@ (bước)").grid(row=r, column=2, sticky="w")
+        ttk.Label(body, text="@ / số thanh").grid(row=r, column=2, sticky="w")
         r += 1
         for lbl, kd, ks in REBAR_FIELDS:
             ttk.Label(body, text=lbl).grid(row=r, column=0, sticky="w", padx=(10, 4), pady=1)
-            ttk.Entry(body, textvariable=self._var(kd), width=5).grid(row=r, column=1, sticky="w")
+            vd = self.vars[kd] if kd in self.vars else self._var(kd)
+            ttk.Entry(body, textvariable=vd, width=5).grid(row=r, column=1, sticky="w")
             ttk.Entry(body, textvariable=self._var(ks), width=6).grid(row=r, column=2, sticky="w")
             r += 1
         ttk.Label(body, text="Thép chủ cổ móng: số thanh / Ø").grid(row=r, column=0, sticky="w", padx=(10, 4), pady=1)
@@ -371,17 +591,13 @@ class App(tk.Tk):
         row("Số lớp lưới đầu trụ", "RL_N", 5)
         row("Lớp BT bảo vệ đáy móng (mm)", "COVER_B", 6)
         row("Lớp BT bảo vệ còn lại (mm)", "COVER", 6)
+        row("Dự phòng thép (%)", "DP", 6)
         head("4. Bản vẽ")
-        ttk.Label(body, text="Tỷ lệ 1/").grid(row=r, column=0, sticky="w", padx=(10, 4))
+        ttk.Label(body, text="Tỷ lệ (A-A, mặt bằng) 1/").grid(row=r, column=0, sticky="w", padx=(10, 4))
         ttk.Combobox(body, textvariable=self._var("SCALE"), values=[str(s) for s in model.SCALES], width=6,
                      state="readonly").grid(row=r, column=1, sticky="w")
         ttk.Button(body, text="Tự chọn", command=self.auto_scale, style="Small.TButton").grid(row=r, column=2, sticky="w")
         r += 1
-        self.l_info = ttk.Label(body, text="", style="Info2.TLabel", wraplength=410, justify="left")
-        self.l_info.grid(row=r, column=0, columnspan=4, sticky="w", padx=6, pady=(10, 2))
-        r += 1
-        self.l_err = ttk.Label(body, text="", style="Err.TLabel", wraplength=410, justify="left")
-        self.l_err.grid(row=r, column=0, columnspan=4, sticky="w", padx=6)
 
     # ------------------------------------------------------------ dữ liệu
     def _fill(self):
@@ -389,7 +605,7 @@ class App(tk.Tk):
         p = self.p
         for k, v in self.vars.items():
             if k == "HT":
-                v.set(["Đỡ", "Néo góc", "Néo dừng"][int(p["HT"])])
+                v.set(model.HT_UI[int(p["HT"])])
             elif k in ("COVER", "COVER_B"):
                 v.set(f"{p[k] * 1000:g}")
             elif k in ("SCALE",):
@@ -408,7 +624,8 @@ class App(tk.Tk):
         for k, v in self.vars.items():
             s = v.get().strip()
             if k == "HT":
-                p["HT"] = {"đỡ": 0, "néo góc": 1, "néo dừng": 2}.get(s.lower(), model.ht_from_string(s))
+                ui = [t.lower() for t in model.HT_UI]
+                p["HT"] = ui.index(s.lower()) if s.lower() in ui else model.ht_from_string(s)
             elif k in ("COVER", "COVER_B"):
                 p[k] = float(s.replace(",", ".")) / 1000.0
             elif k == "SCALE":
@@ -419,26 +636,43 @@ class App(tk.Tk):
                 p[k] = s
         return p
 
+    def _bump(self):
+        """Số liệu / bố trí đã thay đổi: bản vẽ hiện có không còn mới."""
+        self.ver += 1
+        self.dirty = True
+
     def _changed(self):
         if getattr(self, "_filling", False):
             return
-        self.dirty = True
-        self._update_info()
+        self._bump()
+        if self._info_job:                         # đang gõ: chờ ~1,2 s rồi mới kiểm tra / báo lỗi
+            self.after_cancel(self._info_job)
+        self._info_job = self.after(1200, self._info_later)
         if self.v_auto.get():
             if self._job:
                 self.after_cancel(self._job)
             self._job = self.after(1200, self.preview)
 
+    def _info_later(self):
+        self._info_job = None
+        self._update_info()
+
+    def _set_err(self, text):
+        self.l_err.config(text=text)
+        if text:
+            self.l_err.pack(side="top", fill="x", after=self._info_bar)
+        else:
+            self.l_err.pack_forget()
+
     def _update_info(self):
         try:
             p = self._collect()
         except ValueError:
-            self.l_err.config(text="[!] Có ô nhập không phải số.")
+            self._set_err("[!] Có ô nhập không phải số.")
             return None
         err = model.validate(p)
-        self.l_err.config(text=f"[!] {err}" if err else "")
-        if not err:
-            self.l_info.config(text=f"Loại móng: {model.type_name(p)}")
+        warn = [] if err else model.warnings(p)
+        self._set_err(f"[!] {err}" if err else "   ".join(f"[Cảnh báo] {w}" for w in warn))
         return None if err else p
 
     def auto_scale(self):
@@ -449,9 +683,139 @@ class App(tk.Tk):
             pass
 
     # ---------------------------------------------------------- hành động
+    # ------------------------------------------------------------ dự án (nhiều móng)
+    PRJ_TYPES = [("Dự án VE_MONGBANKOSUON", "*" + batch.PROJECT_EXT), ("File Excel móng", "*.xls *.xlsx *.xlsm")]
+
+    def new_project(self):
+        """Dự án mới = chọn đồng loạt nhiều file Excel móng (sheet TONG HOP); lưu thành file *.mongban bằng Lưu dự án."""
+        fs = filedialog.askopenfilenames(title="Tạo dự án - chọn đồng loạt các file Excel móng (Ctrl / Shift + nhấp)",
+                                         filetypes=[("File Excel móng", "*.xls *.xlsx *.xlsm")],
+                                         initialdir=os.path.dirname(self.xls) if self.xls else None)
+        if fs:
+            self.project_file = ""
+            self.set_project(sorted(fs, key=batch.natural_key))
+            self.l_msg.config(text="Đã tạo dự án mới (chưa lưu) - dùng Dự án > Lưu dự án thành... để lưu file *.mongban.")
+
+    def open_project_file(self):
+        f = filedialog.askopenfilename(title="Mở file dự án (*.mongban)", filetypes=self.PRJ_TYPES[:1],
+                                       initialdir=os.path.dirname(self.project_file) if self.project_file else None)
+        if f:
+            self.load_project_file(f)
+
+    def load_project_file(self, f):
+        try:
+            files, qty, cur, missing = batch.load_project(f)
+        except (OSError, ValueError) as ex:
+            messagebox.showerror(APP_NAME, f"Không mở được file dự án:\n{ex}")
+            return
+        if not files:
+            messagebox.showerror(APP_NAME, "Dự án không có file Excel nào còn tồn tại.")
+            return
+        self.st.setdefault("qty", {}).update({os.path.abspath(k): v for k, v in qty.items()})
+        self.project_file = os.path.abspath(f)
+        self.set_project(files, cur)
+        if missing:
+            messagebox.showwarning(APP_NAME, "Không tìm thấy %d file Excel của dự án (đã bỏ qua):\n%s" % (
+                len(missing), "\n".join(missing[:8])))
+
+    def save_project(self, quiet=False):
+        """Lưu dự án vào file *.mongban đang dùng (chưa có -> hỏi tên)."""
+        if not self.project:
+            return
+        if not self.project_file:
+            return self.save_project_as()
+        try:
+            q = self.st.get("qty") or {}
+            batch.save_project(self.project_file, self.project, {k: q.get(k, 1) for k in self.project}, self.proj_i)
+        except OSError as ex:
+            messagebox.showerror(APP_NAME, f"Không lưu được dự án:\n{ex}")
+            return
+        self._proj_refresh()
+        if not quiet:
+            self.l_msg.config(text=f"Đã lưu dự án: {self.project_file}")
+
+    def save_project_as(self):
+        if not self.project:
+            messagebox.showinfo(APP_NAME, "Chưa có dự án: dùng Dự án > Tạo dự án từ nhiều file Excel móng...")
+            return
+        f = filedialog.asksaveasfilename(title="Lưu dự án", defaultextension=batch.PROJECT_EXT,
+                                         filetypes=self.PRJ_TYPES[:1], initialfile="DU_AN" + batch.PROJECT_EXT,
+                                         initialdir=os.path.dirname(self.project[0]))
+        if f:
+            self.project_file = os.path.abspath(f)
+            self.save_project()
+
+    def add_to_project(self):
+        fs = filedialog.askopenfilenames(title="Thêm móng vào dự án", filetypes=self.PRJ_TYPES[1:],
+                                         initialdir=os.path.dirname(self.project[0]) if self.project else None)
+        if fs:
+            self.set_project(self.project + [f for f in fs if f not in self.project], self.proj_i, load=False)
+            self._autosave()
+
+    def remove_from_project(self):
+        if len(self.project) > 1 and messagebox.askyesno(
+                APP_NAME, f"Bớt móng \"{os.path.basename(self.project[self.proj_i])}\" khỏi dự án?\n"
+                          "(File Excel không bị xoá.)"):
+            fs = [f for k, f in enumerate(self.project) if k != self.proj_i]
+            self.set_project(fs, self.proj_i)
+            self._autosave()
+
+    def _autosave(self):
+        """Dự án đã có file *.mongban: tự lưu mỗi khi đổi danh sách / móng đang xem."""
+        if self.project_file and self.project:
+            self.save_project(quiet=True)
+
+    def set_project(self, files, i=0, load=True):
+        """Dự án = danh sách file Excel móng (thứ tự đã chọn, bỏ trùng). load: mở móng thứ i."""
+        seen, out = set(), []
+        for f in files:
+            k = os.path.normcase(os.path.abspath(f))
+            if k not in seen and os.path.isfile(f):
+                seen.add(k)
+                out.append(os.path.abspath(f))
+        self.project = out
+        self.proj_i = max(0, min(i, len(out) - 1))
+        self._proj_refresh()
+        if out and load:
+            self.read_excel(out[self.proj_i])
+
+    def _proj_refresh(self):
+        if not self.project:
+            self._proj_bar.pack_forget()
+            return
+        self.cb_proj.config(values=[f"{k + 1}. {os.path.basename(f)}" for k, f in enumerate(self.project)])
+        self.cb_proj.current(self.proj_i)
+        self.l_proj.config(text=f"{self.proj_i + 1}/{len(self.project)} móng")
+        self.l_pfile.config(text=("Dự án: " + os.path.basename(self.project_file)) if self.project_file
+                            else "Dự án chưa lưu (Dự án > Lưu dự án thành...)")
+        if not self._proj_bar.winfo_ismapped():
+            self._proj_bar.pack(side="top", fill="x", before=self._info_bar)
+
+    def proj_go(self, i):
+        if not self.project:
+            return
+        i = max(0, min(i, len(self.project) - 1))
+        f = self.project[i]
+        if not os.path.isfile(f):
+            messagebox.showerror(APP_NAME, f"Không tìm thấy file:\n{f}")
+            return
+        self.proj_i = i
+        self._proj_refresh()
+        if os.path.abspath(self.xls or "") != f:
+            self.read_excel(f)
+        self._autosave()
+
+    def close_project(self):
+        self._autosave()
+        self.project, self.proj_i, self.project_file = [], 0, ""
+        self._proj_refresh()
+
+    def export_batch(self):
+        BatchDialog(self, self.project or None)
+
     def pick_excel(self):
         f = filedialog.askopenfilename(title="Chọn file Excel (sheet TONG HOP)",
-                                       filetypes=[("Excel", "*.xlsx *.xlsm"), ("Tất cả", "*.*")],
+                                       filetypes=[("Excel", "*.xls *.xlsx *.xlsm"), ("Tất cả", "*.*")],
                                        initialdir=os.path.dirname(self.xls) if self.xls else None)
         if f:
             self.read_excel(f)
@@ -460,16 +824,25 @@ class App(tk.Tk):
         if not path:
             return self.pick_excel()
         try:
-            p, warn = model.read_excel(path, "TONG HOP", self.p)
+            # nền là thông số mặc định: ô trống trong file mới không giữ giá trị của file trước;
+            # chỉ giữ các thông số không có trong Excel (mã số bản vẽ khung tên)
+            p, warn = model.read_excel(path, "TONG HOP", model.fresh_params(self.p))
+            if model.validate(p) is None:
+                p["SCALE"] = model.auto_scale(p)          # mở file mới: luôn tự chọn tỷ lệ
         except Exception as ex:
             messagebox.showerror(APP_NAME, f"Không đọc được file Excel:\n{ex}")
             return
-        if model.validate(p) is None and int(p["SCALE"]) < model.auto_scale(p):
-            p["SCALE"] = model.auto_scale(p)          # tỷ lệ hiện tại không đủ chỗ -> tự chọn
         self.p, self.xls = p, path
+        self._bump()
         self.offsets = load_layout(path)
         self.pending = {}
+        self._undo.clear()
+        self._redo.clear()
         self._fill()
+        ap = os.path.abspath(path)
+        if self.project and ap in self.project:
+            self.proj_i = self.project.index(ap)
+            self._proj_refresh()
         msg = f"Đã đọc {os.path.basename(path)}."
         if warn:
             msg += "  Cảnh báo: " + " ".join(warn)
@@ -486,6 +859,7 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, f"Không nạp được khung tên:\n{ex}")
             return
         self.frame_path = f
+        self._bump()
         self._fill()
         msg = f"Đã nạp khung tên {os.path.basename(f)}."
         if tags:
@@ -500,6 +874,7 @@ class App(tk.Tk):
         def work():
             try:
                 res = export.build(p, self.frame_path or None, self.fields, dict(self.offsets))
+                res.params = p
                 data = export.pdf_bytes(res, only)
                 imgs = pdf_images(data)
                 if only is not None:          # chỉ dựng lại tờ đang xem, các tờ khác giữ ảnh cũ
@@ -523,9 +898,11 @@ class App(tk.Tk):
         p = self._update_info()
         if p is None:
             return
+        self.v3d.set_params(p)
         self.busy = True
         self.l_state.config(text="Đang dựng bản vẽ...")
         self.config(cursor="watch")
+        v0 = self.ver
 
         def done(res, data, imgs, err):
             self.busy = False
@@ -535,7 +912,8 @@ class App(tk.Tk):
                 messagebox.showerror(APP_NAME, f"{err[0]}\n\n{err[1][-1500:]}")
                 return
             self.res, self.pdf, self.pages = res, data, imgs
-            self.dirty = data is None
+            # chỉ coi là bản mới nếu dựng đủ các tờ và số liệu không đổi trong lúc dựng
+            self.dirty = data is None or self.ver != v0
             self.pending = {}
             if self.l_msg.cget("text").startswith("Đã dịch chuyển"):
                 self.l_msg.config(text="")
@@ -543,11 +921,16 @@ class App(tk.Tk):
             self.cb_page.config(values=vals)
             self._show_page(min(self.page_i, len(imgs) - 1))
             self.l_state.config(text=f"{len(imgs)} tờ A3 - tỷ lệ 1/{res.geo.den}")
-        if only is not None and len(self.pages) != (2 if model.is_detail(p) else 1):
+        ns = 2 if model.is_detail(p) else 1
+        if only is not None and len(self.pages) != ns:
             only = None
         self._render(p, done, only)
 
     def _ensure_fresh(self, then):
+        if self.busy:                              # đang dựng: chờ xong rồi kiểm tra lại
+            self.l_state.config(text="Đang dựng bản vẽ... (chờ để xuất)")
+            self.after(300, lambda: self._ensure_fresh(then))
+            return
         if self.pdf is not None and not self.dirty:
             return then()
         p = self._update_info()
@@ -556,13 +939,17 @@ class App(tk.Tk):
             return
         self.busy = True
         self.l_state.config(text="Đang dựng bản vẽ...")
+        v0 = self.ver
 
         def done(res, data, imgs, err):
             self.busy = False
             if err:
                 messagebox.showerror(APP_NAME, f"{err[0]}")
                 return
-            self.res, self.pdf, self.pages, self.dirty = res, data, imgs, False
+            self.res, self.pdf, self.pages = res, data, imgs
+            self.dirty = self.ver != v0
+            if self.dirty:                         # số liệu đổi trong lúc dựng -> dựng lại
+                return self._ensure_fresh(then)
             self.pending = {}
             self.cb_page.config(values=[f"Tờ {i + 1}" for i in range(len(imgs))])
             self._show_page(min(self.page_i, len(imgs) - 1))
@@ -573,8 +960,56 @@ class App(tk.Tk):
         if self.xls:
             return os.path.splitext(os.path.basename(self.xls))[0] + ext
         p = self.p
-        nm = f"MONG_{model.type_name(p)}_{p.get('COT', '')}_{p.get('GD', '')}".replace(" ", "_").replace("/", "-")
+        tn = model.type_name(p)
+        nm = f"MONG_{tn}_{p.get('COT', '')}_{p.get('GD', '')}".replace(" ", "_").replace("/", "-")
         return nm + ext
+
+    # loại file xuất: (khoá, tên, đuôi tên file mặc định, bộ lọc hộp thoại)
+    KINDS = [("pdf", "PDF bản vẽ", ".pdf", ("PDF", "*.pdf")),
+             ("dxf", "AutoCAD DXF (kèm mặt bằng 1:1 đơn vị m)", ".dxf", ("AutoCAD DXF", "*.dxf")),
+             ("xlsx", "Excel khối lượng", "_KL.xlsx", ("Excel", "*.xlsx")),
+             ("ifc", "Mô hình IFC (BIM)", ".ifc", ("IFC", "*.ifc"))]
+
+    def _write(self, kind, f):
+        """Ghi 1 loại file từ bản vẽ đã dựng (self.res, self.pdf)."""
+        if kind == "xlsx" and self.xls and os.path.abspath(f) == os.path.abspath(self.xls):
+            raise OSError("Không được ghi đè lên file Excel đầu vào.")
+        self.res.params = getattr(self.res, "params", None) or self.res.geo.p
+        batch.write(self.res, kind, f, self.pdf)
+
+    def export_ifc(self):
+        def go():
+            f = filedialog.asksaveasfilename(title="Xuất mô hình IFC (BIM)", defaultextension=".ifc",
+                                             filetypes=[("IFC", "*.ifc")], initialfile=self._default_name(".ifc"),
+                                             initialdir=os.path.dirname(self.xls) if self.xls else None)
+            if f:
+                try:
+                    self._write("ifc", f)
+                    self.l_msg.config(text=f"Đã xuất IFC: {f}  (mở bằng Revit, Tekla, Navisworks, BIM viewer...)")
+                except Exception as ex:
+                    messagebox.showerror(APP_NAME, f"Không ghi được file:\n{ex}")
+        self._ensure_fresh(go)
+
+    def export_all(self):
+        ExportAllDialog(self)
+
+    def _export_many(self, kinds, base):
+        """Ghi các loại file đã chọn: base + đuôi (cùng thư mục, cùng tên gốc)."""
+        def go():
+            ok, bad = [], []
+            for k, _, ext, _ in self.KINDS:
+                if k not in kinds:
+                    continue
+                f = base + ext
+                try:
+                    self._write(k, f)
+                    ok.append(os.path.basename(f))
+                except Exception as ex:
+                    bad.append(f"{os.path.basename(f)}: {ex}")
+            self.l_msg.config(text=f"Đã xuất {len(ok)} file vào {os.path.dirname(base)}: " + ", ".join(ok))
+            if bad:
+                messagebox.showerror(APP_NAME, "Không ghi được:\n" + "\n".join(bad))
+        self._ensure_fresh(go)
 
     def export_pdf(self):
         def go():
@@ -612,11 +1047,8 @@ class App(tk.Tk):
                                              initialdir=os.path.dirname(self.xls) if self.xls else None)
             if not f:
                 return
-            if self.xls and os.path.abspath(f) == os.path.abspath(self.xls):
-                messagebox.showerror(APP_NAME, "Không được ghi đè lên file Excel đầu vào.")
-                return
             try:
-                kl_excel.export(self.res.geo.p, self.res.geo, f)
+                self._write("xlsx", f)
                 self.l_msg.config(text=f"Đã xuất Excel khối lượng: {f}")
             except Exception as ex:
                 messagebox.showerror(APP_NAME, f"Không ghi được file:\n{ex}")
@@ -634,38 +1066,111 @@ class App(tk.Tk):
         self.zoom = None
         self._redraw()
 
-    def zoom_by(self, f):
+    def zoom_by(self, f, e=None):
+        """Phóng to / thu nhỏ; có sự kiện chuột thì giữ nguyên điểm bản vẽ dưới con trỏ.
+        Vẽ nhanh (nội suy thô) ngay, vẽ nét đẹp sau khi ngừng lăn chuột."""
         if not self.pages:
             return
+        old = self._geom
+        if e is not None and old:
+            ex, ey = e.x_root - self.pv.winfo_rootx(), e.y_root - self.pv.winfo_rooty()
+            cx, cy = self.pv.canvasx(ex), self.pv.canvasy(ey)
+            ow, oh = self._zs[1], self._zs[2]
+            fu, fv = (cx - old[0]) / ow, (cy - old[1]) / oh
         self.zoom = min(4.0, max(0.1, (self.zoom or self._fit_zoom()) * f))
-        self._redraw()
+        self._redraw(paint=False)
+        if e is not None and old and self._geom:
+            x0, y0, _ = self._geom
+            nw, nh = self._zs[1], self._zs[2]
+            sw = max(self.pv.winfo_width(), nw + 20)
+            sh = max(self.pv.winfo_height(), nh + 20)
+            self.pv.xview_moveto(max(0.0, (x0 + fu * nw - ex) / sw))
+            self.pv.yview_moveto(max(0.0, (y0 + fv * nh - ey) / sh))
+        self._paint(fast=True)
+        self._paint_later()
 
-    def _wheel_zoom(self, e):
-        self.zoom_by(1.15 if e.delta > 0 else 1 / 1.15)
+    def _paint_later(self, ms=180):
+        if getattr(self, "_pjob", None):
+            self.after_cancel(self._pjob)
+        self._pjob = self.after(ms, self._paint)
 
     def _fit_zoom(self):
         im = self.pages[self.page_i]
         w, h = max(50, self.pv.winfo_width() - 20), max(50, self.pv.winfo_height() - 20)
         return min(w / im.width, h / im.height)
 
-    def _redraw(self):
-        from PIL import ImageTk
+    def _redraw(self, paint=True):
+        """Bố trí trang trên khung xem (kích thước ảo theo zoom); chỉ dựng ảnh phần đang thấy (_paint)."""
         if not self.pages:
             return
         im = self.pages[self.page_i]
         z = self.zoom or self._fit_zoom()
         w, h = max(1, int(im.width * z)), max(1, int(im.height * z))
-        self._zimg = im.resize((w, h), resample=3)
-        self._tkimg = ImageTk.PhotoImage(self._zimg)
         self.pv.delete("all")
         cw, ch = self.pv.winfo_width(), self.pv.winfo_height()
         x0 = max(10, (cw - w) // 2)
         y0 = max(10, (ch - h) // 2)
-        self.pv.create_rectangle(x0 + 4, y0 + 4, x0 + w + 4, y0 + h + 4, fill="#232E3A", outline="")
-        self.pv.create_image(x0, y0, image=self._tkimg, anchor="nw")
+        self.pv.create_rectangle(x0 + 4, y0 + 4, x0 + w + 4, y0 + h + 4, fill="#081530", outline="", tags="bg")
+        self.pv.create_rectangle(x0, y0, x0 + w, y0 + h, fill="#FFFFFF", outline="", tags="bg")
         self.pv.configure(scrollregion=(0, 0, max(cw, w + 20), max(ch, h + 20)))
         self._geom = (x0, y0, w / export.PAGE_W)
+        self._zs = (z, w, h)
+        self._painted = None
+        if paint:
+            self._paint()
         self._overlay()
+
+    def _paint(self, fast=False):
+        """Dựng ảnh vùng nhìn thấy (+ lề nửa khung mỗi phía để kéo không bị trống)."""
+        from PIL import Image, ImageTk
+        self._pjob = None
+        if not self.pages or not self._geom:
+            return
+        im = self.pages[self.page_i]
+        x0, y0, _ = self._geom
+        z, w, h = self._zs
+        cw, ch = self.pv.winfo_width(), self.pv.winfo_height()
+        vx, vy = self.pv.canvasx(0), self.pv.canvasy(0)
+        rx0, ry0 = max(x0, int(vx - cw / 2)), max(y0, int(vy - ch / 2))
+        rx1, ry1 = min(x0 + w, int(vx + 1.5 * cw)), min(y0 + h, int(vy + 1.5 * ch))
+        if rx1 - rx0 < 1 or ry1 - ry0 < 1:
+            return
+        box = ((rx0 - x0) / z, (ry0 - y0) / z, min(im.width, (rx1 - x0) / z), min(im.height, (ry1 - y0) / z))
+        self._zimg = im.resize((rx1 - rx0, ry1 - ry0), Image.BILINEAR if fast else Image.BICUBIC, box=box)
+        self._zorg = (rx0, ry0)
+        self._tkimg = ImageTk.PhotoImage(self._zimg)
+        self.pv.delete("pg")
+        self.pv.create_image(rx0, ry0, image=self._tkimg, anchor="nw", tags="pg")
+        self.pv.tag_raise("pg", "bg")
+        self.pv.tag_raise("ov")
+        self._painted = (rx0, ry0, rx1, ry1)
+
+    def _view_covered(self):
+        p = getattr(self, "_painted", None)
+        if not p:
+            return False
+        vx, vy = self.pv.canvasx(0), self.pv.canvasy(0)
+        cw, ch = self.pv.winfo_width(), self.pv.winfo_height()
+        x0, y0, _ = self._geom
+        z, w, h = self._zs
+        return (p[0] <= max(vx, x0) and p[1] <= max(vy, y0) and p[2] >= min(vx + cw, x0 + w)
+                and p[3] >= min(vy + ch, y0 + h))
+
+    def _zcrop(self, x1, y1, x2, y2):
+        """Ảnh trang (đã zoom) trong khung toạ độ canvas, lấy thẳng từ ảnh gốc (nền trắng ngoài trang)."""
+        from PIL import Image
+        im = self.pages[self.page_i]
+        gx, gy, _ = self._geom
+        z = self._zs[0]
+        out = Image.new("RGB", (max(1, int(x2 - x1)), max(1, int(y2 - y1))), "white")
+        sx0, sy0 = max(0.0, (x1 - gx) / z), max(0.0, (y1 - gy) / z)
+        sx1, sy1 = min(im.width, (x2 - gx) / z), min(im.height, (y2 - gy) / z)
+        if sx1 > sx0 and sy1 > sy0:
+            px0, py0 = int(gx + sx0 * z - x1), int(gy + sy0 * z - y1)
+            part = im.resize((max(1, int((sx1 - sx0) * z)), max(1, int((sy1 - sy0) * z))), Image.BILINEAR,
+                             box=(sx0, sy0, sx1, sy1))
+            out.paste(part, (px0, py0))
+        return out
 
     # ------------------------------------------------------------ sắp xếp
     def _objs(self):
@@ -694,9 +1199,17 @@ class App(tk.Tk):
         self.pv.delete("ov")
         if not self._geom:
             return
+        sel = set(getattr(self, "_sel", []))
         for o in self._objs():
             x1, y1, x2, y2 = self._box_px(o)
             moved = any(o.id == k or o.id.startswith(k + ".") for k in self.pending)
+            if o.id in sel:                        # đang chọn (kéo thả / phím mũi tên)
+                self.pv.create_rectangle(x1 - 3, y1 - 3, x2 + 3, y2 + 3, outline="#6A1B9A", width=2, tags="ov")
+                continue
+            if o.kind == "anchor" and o.id.endswith("@k"):        # điểm gãy leader
+                cx_, cy_ = (x1 + x2) / 2, (y1 + y2) / 2
+                self.pv.create_rectangle(cx_ - 3, cy_ - 3, cx_ + 3, cy_ + 3, outline="#1565c0", width=2, tags="ov")
+                continue
             if o.kind == "group":
                 self.pv.create_rectangle(x1 - 3, y1 - 3, x2 + 3, y2 + 3, outline="#1565c0", dash=(6, 3), tags="ov")
             elif o.kind == "anchor":
@@ -729,53 +1242,74 @@ class App(tk.Tk):
         if not self.v_arr.get():
             return
         o = self._pick(e)
-        self.l_state.config(text=f"{o.label or o.id}  (kéo để dịch chuyển, chuột phải để trả về mặc định)" if o else "")
+        self.l_state.config(text=f"{o.label or o.id}  (kéo / nhấp rồi dùng phím mũi tên để dịch chuyển, Ctrl+nhấp: chọn nhiều, "
+                                 f"chuột phải: về mặc định)" if o else "")
 
     def _press(self, e):
         if not self.v_arr.get():
             self.pv.scan_mark(e.x, e.y)
             self._drag = "pan"
             return
+        self.pv.focus_set()                        # nhận phím mũi tên
         o = self._pick(e)
         self._dlast = (0.0, 0.0)
+        sel = getattr(self, "_sel", [])
+        if e.state & 0x0004:                      # Ctrl + nhấp: thêm / bớt khỏi nhóm chọn
+            if o is not None:
+                self._sel = [i for i in sel if i != o.id] if o.id in sel else sel + [o.id]
+            self._drag = None
+            self._overlay()
+            return
         if o is None:
             self._drag = None
+            if sel:
+                self._sel = []
+                self._overlay()
             return
-        x1, y1, x2, y2 = self._box_px(o)
+        if o.id in sel and len(sel) > 1:
+            objs = [ob for ob in self._objs() if ob.id in sel]
+        else:
+            self._sel = [o.id]
+            objs = [o]
         items = []
-        if o.kind != "anchor" and getattr(self, "_zimg", None) is not None:
-            # phần hình của đối tượng đi theo chuột -> thấy kết quả ngay khi kéo
-            from PIL import ImageTk
-            gx, gy, _ = self._geom
-            bx = (int(x1 - gx) - 2, int(y1 - gy) - 2, int(x2 - gx) + 3, int(y2 - gy) + 3)
-            self._dragimg = ImageTk.PhotoImage(self._zimg.crop(bx))
-            items.append(self.pv.create_rectangle(x1 - 2, y1 - 2, x2 + 3, y2 + 3, fill="white", outline="", tags="ov"))
-            items.append(self.pv.create_image(x1 - 2, y1 - 2, image=self._dragimg, anchor="nw", tags="ov"))
-        r = self.pv.create_rectangle(x1, y1, x2, y2, outline="#d32f2f", width=2, dash=(4, 2), tags="ov")
-        items.append(r)
-        self._drag = (o, self.pv.canvasx(e.x), self.pv.canvasy(e.y), items, (x1, y1, x2, y2))
+        from PIL import ImageTk
+        self._dragimgs = []
+        for ob in objs:
+            x1, y1, x2, y2 = self._box_px(ob)
+            if ob.kind != "anchor":
+                # phần hình của đối tượng đi theo chuột -> thấy kết quả ngay khi kéo
+                tki = ImageTk.PhotoImage(self._zcrop(x1 - 2, y1 - 2, x2 + 3, y2 + 3))
+                self._dragimgs.append(tki)
+                self.pv.create_rectangle(x1 - 2, y1 - 2, x2 + 3, y2 + 3, fill="white", outline="", tags="ov")
+                items.append(self.pv.create_image(x1 - 2, y1 - 2, image=tki, anchor="nw", tags="ov"))
+            items.append(self.pv.create_rectangle(x1, y1, x2, y2, outline="#d32f2f", width=2, dash=(4, 2),
+                                                  tags="ov"))
+        self._drag = (objs, self.pv.canvasx(e.x), self.pv.canvasy(e.y), items)
 
     def _motion(self, e):
         if self._drag == "pan":
             self.pv.scan_dragto(e.x, e.y, gain=1)
+            if not self._view_covered():
+                self._paint(fast=True)
             return
         if not self._drag:
             return
-        o, sx, sy, items, _ = self._drag
+        objs, sx, sy, items = self._drag
         dx, dy = self.pv.canvasx(e.x) - sx, self.pv.canvasy(e.y) - sy
         last = getattr(self, "_dlast", (0.0, 0.0))
-        for it in items[1:]:                          # nền trắng (items[0]) đứng yên che chỗ cũ
+        for it in items:                          # nền trắng (không có trong items) đứng yên che chỗ cũ
             self.pv.move(it, dx - last[0], dy - last[1])
-        if len(items) == 1:
-            self.pv.move(items[0], dx - last[0], dy - last[1])
         self._dlast = (dx, dy)
 
     def _release(self, e):
         d = self._drag
         self._drag = None
-        if not d or d == "pan":
+        if d == "pan":
+            self._paint_later(60)
             return
-        o, sx, sy, items, _ = d
+        if not d:
+            return
+        objs, sx, sy, items = d
         self._dlast = (0.0, 0.0)
         s = self._geom[2]
         dx = (self.pv.canvasx(e.x) - sx) / s
@@ -783,18 +1317,70 @@ class App(tk.Tk):
         if abs(dx) < 0.2 and abs(dy) < 0.2:
             self._overlay()
             return
-        self._move(o.id, dx, dy)
+        self._move_many(self._top_ids([o.id for o in objs]), dx, dy)
+
+    @staticmethod
+    def _top_ids(ids):
+        """Bỏ đối tượng con khi đã chọn cả đối tượng cha (tránh dịch 2 lần)."""
+        return [i for i in ids if not any(i != j and (i.startswith(j + ".") or i.startswith(j + "@")) for j in ids)]
+
+    def _key_move(self, e, ux, uy):
+        if not self.v_arr.get() or not getattr(self, "_sel", []) or not self._geom:
+            return None
+        step = 5.0 if e.state & 0x0001 else 1.0
+        ids = self._top_ids(list(self._sel))
+        if self._kjob is None:
+            self._snap()
+        else:
+            self.after_cancel(self._kjob)
+        for oid in ids:
+            cur = self.offsets.get(oid, [0.0, 0.0])
+            self.offsets[oid] = [round(cur[0] + ux * step, 2), round(cur[1] + uy * step, 2)]
+            pd = self.pending.get(oid, [0.0, 0.0])
+            self.pending[oid] = [pd[0] + ux * step, pd[1] + uy * step]
+        self._overlay()
+        self._kjob = self.after(450, self._key_done)
+        return "break"
+
+    def _key_done(self):
+        self._kjob = None
+        self._layout_changed()
+
+    def _snap(self):
+        """Lưu trạng thái sắp xếp trước khi thay đổi (cho Ctrl+Z)."""
+        self._undo.append(copy.deepcopy(self.offsets))
+        del self._undo[:-100]
+        self._redo.clear()
+
+    def _undo_redo(self, back):
+        if not self.v_arr.get():
+            return
+        src, dst = (self._undo, self._redo) if back else (self._redo, self._undo)
+        if not src:
+            return
+        dst.append(copy.deepcopy(self.offsets))
+        self.offsets = src.pop()
+        self.pending = {}
+        self._bump()
+        save_layout(self.xls, self.offsets)
+        self.l_msg.config(text="Đã hoàn tác." if back else "Đã làm lại.")
+        self.preview()
 
     def _move(self, oid, dx, dy):
-        cur = self.offsets.get(oid, [0.0, 0.0])
-        self.offsets[oid] = [round(cur[0] + dx, 2), round(cur[1] + dy, 2)]
-        pd = self.pending.get(oid, [0.0, 0.0])
-        self.pending[oid] = [pd[0] + dx, pd[1] + dy]
+        self._move_many([oid], dx, dy)
+
+    def _move_many(self, ids, dx, dy):
+        self._snap()                               # 1 lần hoàn tác cho cả nhóm
+        for oid in ids:
+            cur = self.offsets.get(oid, [0.0, 0.0])
+            self.offsets[oid] = [round(cur[0] + dx, 2), round(cur[1] + dy, 2)]
+            pd = self.pending.get(oid, [0.0, 0.0])
+            self.pending[oid] = [pd[0] + dx, pd[1] + dy]
         self._layout_changed()
 
     def _layout_changed(self):
         """Dịch chuyển: dựng lại ngay tờ đang xem (phần đã kéo vẫn hiện ở vị trí mới trong lúc chờ)."""
-        self.dirty = True
+        self._bump()
         save_layout(self.xls, self.offsets)
         self.preview(only={self.page_i})
 
@@ -811,6 +1397,8 @@ class App(tk.Tk):
         m.tk_popup(e.x_root, e.y_root)
 
     def _reset(self, ids):
+        if any(any(k == i or k.startswith(i + ".") for i in ids) for k in self.offsets):
+            self._snap()
         changed = False
         for k in list(self.offsets):
             if any(k == i or k.startswith(i + ".") for i in ids):
@@ -836,8 +1424,11 @@ class App(tk.Tk):
             p = self._collect()
         except ValueError:
             p = self.p
+        self._autosave()
         save_settings({"xls": self.xls, "frame": self.frame_path, "fields": self.fields,
-                       "auto": self.v_auto.get(), "params": p})
+                       "auto": self.v_auto.get(), "params": p,
+                       "export_all": self.st.get("export_all"), "batch": self.st.get("batch"),
+                       "project": {"files": self.project, "i": self.proj_i, "file": self.project_file}, "qty": self.st.get("qty")})
         self.destroy()
 
 
@@ -850,6 +1441,379 @@ def pdf_images(data, dpi=150):
             pix = pg.get_pixmap(dpi=dpi)
             out.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
     return out
+
+
+class BatchDialog(tk.Toplevel):
+    """Thư mục dự án: danh sách file Excel, mở từng file, xuất bản vẽ / file đồng loạt (chạy nền)."""
+
+    def __init__(self, app: App, files=None):
+        super().__init__(app)
+        self.app = app
+        self.fixed = list(files) if files else None          # dự án: danh sách file cố định (không quét thư mục)
+        self.title("Dự án" if self.fixed else "Thư mục dự án")
+        self.transient(app)
+        self.geometry("880x600")
+        self.minsize(640, 420)
+        cfg = app.st.get("batch") or {}
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill="both", expand=True)
+        f.columnconfigure(1, weight=1)
+        f.rowconfigure(2, weight=1)
+        d0 = cfg.get("dir") or (os.path.dirname(app.xls) if app.xls else "")
+        self.v_dir = tk.StringVar(value=d0)
+        self.v_sub = tk.BooleanVar(value=bool(cfg.get("sub")))
+        bar = ttk.Frame(f)
+        bar.grid(row=1, column=0, columnspan=3, sticky="we", pady=(6, 4))
+        if self.fixed:
+            pf = os.path.basename(app.project_file) if app.project_file else "chưa lưu"
+            ttk.Label(f, text=f"Dự án ({pf}): {len(self.fixed)} móng - thư mục gốc: {self.root()}").grid(
+                row=0, column=0, columnspan=3, sticky="w")
+        else:
+            ttk.Label(f, text="Thư mục dự án").grid(row=0, column=0, sticky="w")
+            ttk.Entry(f, textvariable=self.v_dir).grid(row=0, column=1, sticky="we", padx=4)
+            ttk.Button(f, text="Chọn...", command=self.pick_dir).grid(row=0, column=2)
+            ttk.Checkbutton(bar, text="Gồm thư mục con", variable=self.v_sub, command=self.scan).pack(side="left")
+            ttk.Button(bar, text="⟳ Tải lại danh sách", command=self.scan).pack(side="left", padx=6)
+        ttk.Button(bar, text="Chọn tất cả", command=lambda: self.tv.selection_set(self.tv.get_children())).pack(
+            side="left")
+        ttk.Button(bar, text="Bỏ chọn", command=lambda: self.tv.selection_set(())).pack(side="left", padx=4)
+        if not self.fixed:
+            ttk.Button(bar, text="Mở file đang chọn", command=self.open_sel).pack(side="left", padx=(4, 0))
+            ttk.Button(bar, text="Nhập các file đang chọn vào dự án", command=self.to_project).pack(side="left", padx=4)
+        # đổi vị trí (thứ tự móng, thứ tự dòng trong bảng khối lượng tổng hợp)
+        for t, d in (("▼", 1), ("▲", -1)):
+            b = ttk.Button(bar, text=t, width=3, command=lambda d=d: self.move(d))
+            b.pack(side="right", padx=(0, 4))
+            Tip(b, "Đổi vị trí", "Đưa các móng đang chọn " + ("xuống" if d > 0 else "lên") + " 1 vị trí"
+                + (" (thứ tự trong dự án)." if self.fixed else "."))
+        cols = ("sl", "loai", "tt")
+        self.tv = ttk.Treeview(f, columns=cols, selectmode="extended")
+        self.tv.heading("#0", text="File Excel (nhấp đúp: mở; nhấp đúp cột SL: nhập số lượng)")
+        self.tv.heading("sl", text="SL")
+        self.tv.column("sl", width=50, stretch=False, anchor="center")
+        self.tv.heading("loai", text="Loại")
+        self.tv.heading("tt", text="Trạng thái")
+        self.tv.column("#0", width=420)
+        self.tv.column("loai", width=110, stretch=False)
+        self.tv.column("tt", width=300)
+        self.tv.grid(row=2, column=0, columnspan=3, sticky="nsew")
+        sb = ttk.Scrollbar(f, orient="vertical", command=self.tv.yview)
+        sb.grid(row=2, column=3, sticky="ns")
+        self.tv.configure(yscrollcommand=sb.set)
+        self.tv.bind("<Double-1>", self._dbl)
+        kf = ttk.LabelFrame(f, text="Loại file xuất", padding=6)
+        kf.grid(row=3, column=0, columnspan=3, sticky="we", pady=(8, 4))
+        sel = cfg.get("kinds") or app.st.get("export_all") or [k for k, *_ in batch.KINDS]
+        self.v_k = {}
+        for i, (k, lbl, ext) in enumerate(batch.KINDS):
+            v = tk.BooleanVar(value=k in sel)
+            ttk.Checkbutton(kf, text=f"{lbl} (*{ext})", variable=v).grid(row=i // 2, column=i % 2, sticky="w",
+                                                                         padx=(0, 20))
+            self.v_k[k] = v
+        self.sum_key = "sum_p" if self.fixed else "sum"                 # nhớ riêng: dự án (mặc định bật) / thư mục
+        self.v_sum = tk.BooleanVar(value=cfg.get(self.sum_key, bool(self.fixed)))
+        ttk.Checkbutton(kf, text=f"Khối lượng tổng hợp phần móng - cả dự án, theo số lượng SL ({batch.SUMMARY_NAME})",
+                        variable=self.v_sum).grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Label(f, text="Thư mục xuất").grid(row=4, column=0, sticky="w")
+        self.v_out = tk.StringVar(value=cfg.get("out") or "")
+        ttk.Entry(f, textvariable=self.v_out).grid(row=4, column=1, sticky="we", padx=4)
+        ttk.Button(f, text="Chọn...", command=self.pick_out).grid(row=4, column=2)
+        ttk.Label(f, text="(để trống = thư mục con XUAT trong thư mục dự án / thư mục gốc của dự án; tên file = tên file Excel; dùng khung "
+                          "tên, cấu hình khung và vị trí đã sắp xếp của từng file như khi mở trong app)",
+                  wraplength=820, justify="left", foreground="#555").grid(row=5, column=0, columnspan=3, sticky="w")
+        bot = ttk.Frame(f)
+        bot.grid(row=6, column=0, columnspan=3, sticky="we", pady=(8, 0))
+        self.pb = ttk.Progressbar(bot, mode="determinate")
+        self.pb.pack(side="left", fill="x", expand=True)
+        self.b_run = ttk.Button(bot, text="Xuất đồng loạt", command=self.run)
+        self.b_run.pack(side="left", padx=6)
+        self.b_stop = ttk.Button(bot, text="Dừng", command=self.stop, state="disabled")
+        self.b_stop.pack(side="left")
+        ttk.Button(bot, text="Đóng", command=self.close).pack(side="left", padx=(6, 0))
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.files, self._stop, self._q, self._busy = [], False, None, False
+        self.scan()
+
+    def _save(self):
+        if self.fixed:                                     # dự án: chỉ nhớ loại file, thư mục xuất
+            b = dict(self.app.st.get("batch") or {})
+            b.update({"out": self.v_out.get().strip(), "kinds": [k for k, v in self.v_k.items() if v.get()],
+                      self.sum_key: self.v_sum.get()})
+            self.app.st["batch"] = b
+            return
+        b = dict(self.app.st.get("batch") or {})
+        b.update({"dir": self.v_dir.get().strip(), "sub": self.v_sub.get(), self.sum_key: self.v_sum.get(),
+                  "out": self.v_out.get().strip(), "kinds": [k for k, v in self.v_k.items() if v.get()]})
+        self.app.st["batch"] = b
+
+    def pick_dir(self):
+        d = filedialog.askdirectory(parent=self, title="Chọn thư mục dự án", initialdir=self.v_dir.get() or None)
+        if d:
+            self.v_dir.set(d)
+            self.scan()
+
+    def pick_out(self):
+        d = filedialog.askdirectory(parent=self, title="Chọn thư mục xuất",
+                                    initialdir=self.v_out.get() or self.v_dir.get() or None)
+        if d:
+            self.v_out.set(d)
+
+    def root(self):
+        """Thư mục gốc: thư mục dự án, hoặc thư mục chung của các file trong dự án."""
+        if self.fixed:
+            try:
+                return os.path.commonpath([os.path.dirname(os.path.abspath(f)) for f in self.fixed])
+            except ValueError:                             # khác ổ đĩa
+                return os.path.dirname(os.path.abspath(self.fixed[0]))
+        return self.v_dir.get().strip()
+
+    def qty(self, f):
+        return int((self.app.st.get("qty") or {}).get(os.path.abspath(f), 1))
+
+    def _dbl(self, e):
+        iid, col = self.tv.identify_row(e.y), self.tv.identify_column(e.x)
+        if iid and col == "#1":                              # cột SL: nhập số lượng ngay tại bảng
+            self._edit_qty(iid)
+        else:
+            self.open_sel()
+        return "break"
+
+    def _edit_qty(self, iid):
+        bb = self.tv.bbox(iid, "#1")
+        if not bb:
+            return
+        ent = ttk.Entry(self.tv, justify="center")
+        ent.place(x=bb[0], y=bb[1], width=bb[2], height=bb[3])
+        ent.insert(0, str(self.tv.set(iid, "sl")))
+        ent.select_range(0, "end")
+        ent.focus_set()
+        done = {"v": False}
+
+        def commit(e=None):
+            if done["v"]:
+                return
+            done["v"] = True
+            txt = ent.get().strip()
+            ent.destroy()
+            try:
+                q = int(float(txt.replace(",", ".")))
+                if q < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(APP_NAME, "Số lượng phải là số nguyên >= 0.", parent=self)
+                return
+            self.app.st.setdefault("qty", {})[os.path.abspath(self.files[int(iid)])] = q
+            self.tv.set(iid, "sl", q)
+            if self.fixed:
+                self.app._autosave()
+
+        def cancel(e=None):
+            done["v"] = True
+            ent.destroy()
+        ent.bind("<Return>", commit)
+        ent.bind("<KP_Enter>", commit)
+        ent.bind("<FocusOut>", commit)
+        ent.bind("<Escape>", cancel)
+
+    def move(self, d):
+        """Đưa các dòng đang chọn lên (d = -1) / xuống (d = 1) 1 vị trí. Dự án: đổi thứ tự trong dự án (lưu theo)."""
+        if self._busy:
+            return
+        idx = sorted(int(i) for i in self.tv.selection())
+        if not idx:
+            return
+        fs, sel = list(self.files), set(idx)
+        order = range(len(fs)) if d < 0 else range(len(fs) - 1, -1, -1)
+        for i in order:
+            j = i + d
+            if i in sel and 0 <= j < len(fs) and j not in sel:
+                fs[i], fs[j] = fs[j], fs[i]
+                sel = (sel - {i}) | {j}
+        keep = [fs[i] for i in sel]
+        if self.fixed:
+            a = self.app
+            cur = a.project[a.proj_i] if a.project else None
+            a.project = fs + [f for f in a.project if f not in fs]
+            a.proj_i = a.project.index(cur) if cur in a.project else 0
+            a._proj_refresh()
+            a._autosave()
+            self.fixed = list(a.project)
+        self.files = fs
+        self._fill_tree(keep)
+
+    def to_project(self):
+        s = self.tv.selection()
+        if s and not self._busy:
+            self._save()
+            self.app.project_file = ""
+            self.app.set_project([self.files[int(i)] for i in s])
+            self.destroy()
+
+    def scan(self):
+        if self._busy:
+            return
+        d = self.root()
+        if self.fixed:
+            self.files = [f for f in self.fixed if os.path.isfile(f)]
+        else:
+            self.files = batch.find_excel(d, self.v_sub.get()) if d and os.path.isdir(d) else []
+        self._fill_tree(None)
+
+    def _fill_tree(self, selected):
+        """Dựng lại bảng theo self.files; selected: danh sách file đang chọn (None = chọn tất cả)."""
+        d = self.root()
+        self.tv.delete(*self.tv.get_children())
+        for i, f in enumerate(self.files):
+            kind = "Móng bản"
+            self.tv.insert("", "end", iid=str(i), text=os.path.relpath(f, d), values=(self.qty(f), kind, ""))
+        kids = self.tv.get_children()
+        self.tv.selection_set(kids if selected is None else [str(i) for i, f in enumerate(self.files) if f in selected])
+        self.pb.configure(value=0, maximum=max(1, len(self.files)))
+
+    def open_sel(self):
+        s = self.tv.selection()
+        if s and not self._busy:
+            self._save()
+            f = self.files[int(s[0])]
+            if self.fixed and f in self.app.project:
+                self.app.proj_go(self.app.project.index(f))
+            else:
+                self.app.read_excel(f)
+
+    def stop(self):
+        self._stop = True
+
+    def close(self):
+        if self._busy:
+            self._stop = True
+            return
+        self._save()
+        self.destroy()
+
+    def run(self):
+        sel = [int(i) for i in self.tv.selection()]
+        kinds = [k for k, v in self.v_k.items() if v.get()]
+        d = self.root()
+        do_sum = self.v_sum.get()
+        if not sel or not (kinds or do_sum):
+            messagebox.showwarning(APP_NAME, "Chọn ít nhất 1 file Excel và 1 loại file xuất.", parent=self)
+            return
+        out = self.v_out.get().strip() or os.path.join(d, "XUAT")
+        self._save()
+        self._q = queue.Queue()
+        self._stop, self._busy = False, True
+        self.b_run.configure(state="disabled")
+        self.b_stop.configure(state="normal")
+        self.pb.configure(value=0, maximum=len(sel))
+        a = self.app
+        job = [(i, self.files[i], load_layout(self.files[i])) for i in sorted(sel)]
+        qty = {i: self.qty(self.files[i]) for i in sel}
+        args = (a.frame_path or None, copy.deepcopy(a.fields), dict(a.p))
+
+        def work():
+            ok, rows = 0, []
+            for n, (i, f, offs) in enumerate(job):
+                if self._stop:
+                    self._q.put(("row", i, "Đã dừng"))
+                    continue
+                self._q.put(("row", i, "Đang xuất..."))
+                try:
+                    sub = os.path.relpath(os.path.dirname(f), d)
+                    res = batch.export_file(f, os.path.normpath(os.path.join(out, sub)), kinds, args[0], args[1],
+                                            offs, args[2])
+                    if do_sum:
+                        rows.append((qty[i], batch.summary_row(res.data)))
+                    msg = f"Xong {len(res)} file" + (" + khối lượng" if do_sum else "") + \
+                        (f" - cảnh báo: {' '.join(res.warn)[:120]}" if res.warn else "")
+                    ok += 1
+                except Exception as ex:
+                    msg = f"LỖI: {ex}"
+                self._q.put(("row", i, msg))
+                self._q.put(("prog", n + 1))
+            extra = ""
+            if do_sum and rows and not self._stop:
+                try:
+                    os.makedirs(out, exist_ok=True)
+                    fs = os.path.join(out, batch.SUMMARY_NAME)
+                    batch.write_summary(rows, fs)
+                    extra = f"\nKhối lượng tổng hợp: {fs}"
+                except Exception as ex:
+                    extra = f"\nKHÔNG ghi được khối lượng tổng hợp: {ex}"
+            self._q.put(("end", ok, len(job), out + extra))
+        threading.Thread(target=work, daemon=True).start()
+        self.after(100, self._poll)
+
+    def _poll(self):
+        try:
+            while True:
+                m = self._q.get_nowait()
+                if m[0] == "row":
+                    self.tv.set(str(m[1]), "tt", m[2])
+                    self.tv.see(str(m[1]))
+                elif m[0] == "prog":
+                    self.pb.configure(value=m[1])
+                else:
+                    self._busy = False
+                    self.b_run.configure(state="normal")
+                    self.b_stop.configure(state="disabled")
+                    self.app.l_msg.config(text=f"Xuất đồng loạt: {m[1]}/{m[2]} file Excel thành công -> {m[3]}")
+                    messagebox.showinfo(APP_NAME, f"Đã xuất {m[1]}/{m[2]} file Excel.\nThư mục: {m[3]}", parent=self)
+                    return
+        except queue.Empty:
+            pass
+        self.after(150, self._poll)
+
+
+class ExportAllDialog(tk.Toplevel):
+    """Xuất nhiều loại file 1 lần: chọn loại (mặc định tất cả) + tên file gốc."""
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.app = app
+        self.title("Xuất tất cả")
+        self.transient(app)
+        self.resizable(False, False)
+        f = ttk.Frame(self, padding=12)
+        f.pack(fill="both")
+        ttk.Label(f, text="Chọn loại file cần xuất (cùng thư mục, cùng tên gốc):").grid(row=0, column=0, columnspan=3,
+                                                                                         sticky="w", pady=(0, 6))
+        sel = app.st.get("export_all") or [k for k, *_ in App.KINDS]
+        self.v = {}
+        for i, (k, lbl, ext, _) in enumerate(App.KINDS):
+            var = tk.BooleanVar(value=k in sel)
+            ttk.Checkbutton(f, text=f"{lbl}  (*{ext})", variable=var).grid(row=i + 1, column=0, columnspan=3, sticky="w")
+            self.v[k] = var
+        r = len(App.KINDS) + 1
+        ttk.Label(f, text="Tên file gốc").grid(row=r, column=0, sticky="w", pady=(10, 0))
+        d = os.path.dirname(app.xls) if app.xls else os.path.expanduser("~")
+        self.v_base = tk.StringVar(value=os.path.join(d, os.path.splitext(app._default_name(".pdf"))[0]))
+        ttk.Entry(f, textvariable=self.v_base, width=56).grid(row=r + 1, column=0, columnspan=2, sticky="we")
+        ttk.Button(f, text="Chọn...", command=self.pick).grid(row=r + 1, column=2, padx=(4, 0))
+        bf = ttk.Frame(f)
+        bf.grid(row=r + 2, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Button(bf, text="Chọn tất cả", command=lambda: [v.set(True) for v in self.v.values()]).pack(side="left")
+        ttk.Button(bf, text="Xuất", command=self.ok).pack(side="left", padx=6)
+        ttk.Button(bf, text="Huỷ", command=self.destroy).pack(side="left")
+
+    def pick(self):
+        cur = self.v_base.get()
+        f = filedialog.asksaveasfilename(parent=self, title="Tên file gốc (không cần đuôi)",
+                                         initialdir=os.path.dirname(cur), initialfile=os.path.basename(cur))
+        if f:
+            self.v_base.set(os.path.splitext(f)[0] if f.lower().endswith((".pdf", ".dxf", ".xlsx", ".ifc")) else f)
+
+    def ok(self):
+        kinds = [k for k, v in self.v.items() if v.get()]
+        base = self.v_base.get().strip()
+        if not kinds or not base:
+            messagebox.showwarning(APP_NAME, "Chọn ít nhất 1 loại file và tên file gốc.", parent=self)
+            return
+        if not os.path.isdir(os.path.dirname(os.path.abspath(base))):
+            messagebox.showerror(APP_NAME, "Thư mục không tồn tại.", parent=self)
+            return
+        self.app.st["export_all"] = kinds
+        self.destroy()
+        self.app._export_many(kinds, base)
 
 
 class FieldsDialog(tk.Toplevel):
@@ -884,15 +1848,41 @@ class FieldsDialog(tk.Toplevel):
             bv = tk.BooleanVar(value=bool(cfg.get("bold")))
             ttk.Checkbutton(f, variable=bv).grid(row=i + 2, column=len(self.COLS) + 1)
             self.v[(k, "bold")] = bv
+        # logo: file ảnh + ô đặt (khung có logo OLE nhưng file DXF không lưu dữ liệu ảnh)
+        lg = frame.logo_cfg(app.fields)
+        r0 = len(frame.FIELD_LABELS) + 2
+        ttk.Separator(f).grid(row=r0, column=0, columnspan=8, sticky="ew", pady=(8, 4))
+        ttk.Label(f, text="Logo (ảnh PNG/JPG; \"Logo SEIAC\" = logo kèm chương trình) - dùng khi file khung DXF không "
+                          "lưu ảnh logo; để trống = tự dùng logo SEIAC khi khung có chỗ logo bị mất ảnh",
+                  wraplength=560, justify="left").grid(row=r0 + 1, column=0, columnspan=8, sticky="w")
+        self.v_logo = tk.StringVar(value=lg.get("file") or "")
+        ttk.Entry(f, textvariable=self.v_logo, width=48).grid(row=r0 + 2, column=0, columnspan=5, sticky="w")
+        ttk.Button(f, text="Chọn...", command=self.pick_logo).grid(row=r0 + 2, column=5, sticky="w")
+        ttk.Button(f, text="Logo SEIAC", command=lambda: self.v_logo.set(frame.LOGO_BUILTIN)).grid(
+            row=r0 + 2, column=6, columnspan=2, sticky="w")
+        ttk.Label(f, text="Ô đặt logo x0, y0, x1, y1 (mm)").grid(row=r0 + 3, column=0, sticky="w")
+        self.v_rect = []
+        for j, val in enumerate(lg["rect"]):
+            var = tk.StringVar(value=f"{float(val):g}")
+            ttk.Entry(f, textvariable=var, width=8).grid(row=r0 + 3, column=j + 1, padx=2, pady=1)
+            self.v_rect.append(var)
         bf = ttk.Frame(f)
         bf.grid(row=20, column=0, columnspan=8, sticky="e", pady=(10, 0))
         ttk.Button(bf, text="Mặc định", command=self.reset).pack(side="left")
         ttk.Button(bf, text="Lưu", command=self.ok).pack(side="left", padx=6)
         ttk.Button(bf, text="Huỷ", command=self.destroy).pack(side="left")
 
+    def pick_logo(self):
+        f = filedialog.askopenfilename(parent=self, title="Chọn ảnh logo",
+                                       filetypes=[("Ảnh", "*.png *.jpg *.jpeg *.bmp"), ("Tất cả", "*.*")])
+        if f:
+            self.v_logo.set(f)
+
     def reset(self):
         for (k, c), var in self.v.items():
             var.set(frame.DEFAULT_FIELDS[k].get(c, "") if c != "bold" else bool(frame.DEFAULT_FIELDS[k].get("bold")))
+        for var, val in zip(self.v_rect, frame.DEFAULT_LOGO["rect"]):
+            var.set(f"{val:g}")
 
     def ok(self):
         out = copy.deepcopy(self.app.fields)
@@ -905,10 +1895,16 @@ class FieldsDialog(tk.Toplevel):
                     cfg[c] = var.get().strip().upper() or "L"
                 else:
                     cfg[c] = float(var.get().replace(",", "."))
+            out["LOGO"] = {"file": self.v_logo.get().strip(),
+                           "rect": [float(v.get().replace(",", ".")) for v in self.v_rect]}
         except ValueError:
             messagebox.showerror(APP_NAME, "Toạ độ / chiều cao phải là số.", parent=self)
             return
+        if out["LOGO"]["file"] and not frame.logo_png(out):
+            messagebox.showerror(APP_NAME, "Không đọc được file ảnh logo.", parent=self)
+            return
         self.app.fields = out
+        self.app._bump()
         self.destroy()
         self.app.dirty = True
         self.app.preview()

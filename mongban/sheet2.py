@@ -677,6 +677,8 @@ def bar_shape5(c: Ctx, x0, x1, yc):
 
 def bar_groups(rows, pos):
     out, lastk = [], None
+    if not rows:
+        return out
     for r in rows:
         key = (ni(r[2]), ni(r[3]), ni(r[4]), ni(r[5]))
         if key == lastk:
@@ -774,5 +776,22 @@ def draw(c: Ctx, g: Geo):
 
 
 def sheet_den(g) -> int:
-    """Tỷ lệ ghi ở khung tên tờ 2: tỷ lệ hình bố trí thép (mặt cắt A-A)."""
+    """Tỷ lệ ghi ở khung tên tờ 2: tỷ lệ hình bố trí thép (mặt cắt A-A, mặt bằng thép)."""
     return g.den
+
+
+def sheet_geo(p, g: Geo) -> Geo:
+    """Hình học tờ 2: cùng tỷ lệ tờ 1; nếu các bảng kích thước từng thanh dưới mặt bằng thép không đủ chỗ (móng lớn)
+    thì dùng tỷ lệ nhỏ hơn kế tiếp trong danh sách cho tờ 2."""
+    if model.is_tkkt(p):
+        return g
+    cand = [d for d in model.SCALES if d >= g.den] or [g.den]
+    for d in cand:
+        g2 = g if d == g.den else Geo(dict(p, SCALE=d))
+        if not getattr(g2, "kl", None):
+            g2.calc_kl()
+        n = max([len(bar_groups(g2.klb.get(pos) or [], pos)) for pos in (2, 4, 5)] or [0])
+        yb = g2.planCy2 - g2.hLotY - 40.0
+        if yb - 33.0 >= 11.0 + 3.6 * n:
+            return g2
+    return g2

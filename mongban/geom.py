@@ -163,7 +163,7 @@ class Geo:
                     return r - cl if a < r else r + cl
             return a
         if self.long_x():
-            span = self.bar_span()
+            span = g("L") - 2 * c - max(g("RB_BOT_D"), g("RB_TOP_D")) / 1000.0   # như bar_span, không phụ thuộc tỷ lệ
             bot = [v / k for v in self.offs_top(span, self.hPl / k, g("RB_BOT_S") / 1000.0)]
             top = [v / k for v in self.offs_top(span, self.hPl / k, g("RB_TOP_S") / 1000.0)]
             same = sorted({round(abs(d), 6) for d in bot if any(abs(d - t) < 0.02 for t in top)}) or \

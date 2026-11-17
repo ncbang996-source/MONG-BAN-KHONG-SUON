@@ -220,6 +220,35 @@ def area_vai(p) -> float:
     return (l + 2 * mp + 2 * ls + 2 * fold + 1) * (b + 2 * mp + 2 * ls + 2 * fold + 1)
 
 
+def pit_depth(p) -> float:
+    """Chiều sâu hố đào: H1 + dày lót + dày đệm cát."""
+    return p["H1"] + p["TL"] + p["HC"]
+
+
+def vol_dao(p) -> float:
+    """Đào đất: chóp cụt Hd/6·(a1·b1 + a2·b2 + (a1+a2)(b1+b2)) - như Excel khối lượng."""
+    hd = pit_depth(p)
+    a1, b1 = p["L"] + 2 * p["MPIT"], p["B"] + 2 * p["MPIT"]
+    a2, b2 = a1 + 2 * p["SLOPE"] * hd, b1 + 2 * p["SLOPE"] * hd
+    return hd / 6 * (a1 * b1 + a2 * b2 + (a1 + a2) * (b1 + b2))
+
+
+def vol_dap(p) -> float:
+    """Đắp hoàn trả = đào − phần móng dưới mặt đất − lót − đệm cát."""
+    under = vol_mong(p) - 4 * p["BB"] ** 2 * p["H2"]
+    return vol_dao(p) - under - vol_lot(p) - vol_cat(p)
+
+
+def area_vk(p) -> float:
+    """Ván khuôn: mép bản móng 2·(L + B)·hv + 4 cổ móng 4·b·(H − hb) (mặt vát không ghép ván khuôn)."""
+    return 2 * (p["L"] + p["B"]) * p["HV"] + 4 * 4 * p["BB"] * (H(p) - p["HB"])
+
+
+def den_bu(p):
+    """(dài, rộng) đền bù (m): bản móng + 0.5 m mỗi bên."""
+    return p["L"] + 1.0, p["B"] + 1.0
+
+
 def bolt_dia(p) -> int:
     import re
     m = re.search(r"M\s*(\d+)", str(p.get("BLN", "")))
@@ -317,12 +346,28 @@ def warnings(p) -> list:
     return out
 
 
+def _summary_w(p) -> float:
+    """Bề rộng ước tính bảng tổng kê tờ 1 (mm giấy, như sheet1.draw_summary): số cột Ø theo các đường kính thép."""
+    nd = len({int(p[k] + 0.5) for k in ("RB_BOT_D", "RB_TOP_D", "RB_CH_D", "RC_D", "RT_D", "RP_D", "RL_D")})
+    return 30.0 + 15.0 * nd + 21.0 + (42.0 if p["HC"] > 1e-6 else 0.0) + 18.0
+
+
 def auto_scale(p) -> int:
+    """Tỷ lệ tờ 1: tỷ lệ lớn nhất trong SCALES vẽ đủ mặt cắt A-A + mặt bằng trong khổ giấy, và mặt cắt (miệng hố,
+    mặt đất, chữ bu lông) không chạm bảng tổng kê ở góc trên bên phải."""
     k1 = 172.1 / (H(p) + p["B"] + 2 * p["ML"] + p["HC"])
     k2 = 256.0 / (p["L"] + 2 * p["MPIT"] + 2 * SLOPE_DRAW * (p["H1"] + p["TL"] + p["HC"]))
-    k = min(k1, k2)
+    x0 = 395.0 - _summary_w(p) - 3.0                  # mép trái bảng tổng kê
     for d in SCALES:
-        if 1000.0 / d <= k:
+        k = 1000.0 / d
+        if k > min(k1, k2):
+            continue
+        hpt = k * (p["L"] / 2 + p["MPIT"]) + k * SLOPE_DRAW * (p["H1"] + p["TL"] + p["HC"])
+        cx = max(100.2, 78.0 + hpt)
+        ygl = 262.2 - k * p["H2"]
+        pit = cx + hpt + 8.0 <= x0 or ygl + 6.0 <= 247.0
+        bolt = cx + k * (p["L1"] + p["BB"]) / 2 + 30.0 <= x0
+        if pit and bolt:
             return d
     return SCALES[-1]
 

@@ -17,6 +17,16 @@ jobs:
         run: pip install -r requirements.txt
       - name: Kiểm tra dựng bản vẽ mẫu
         run: python tests/smoke.py
+      - name: Khóa định dạng bản vẽ
+        run: python tests/regression.py
+      - name: Kiểm tra khung tên
+        run: python tests/smoke_frame.py
+      - name: Kiểm tra IFC, 3D, mặt bằng 1:1
+        run: python tests/smoke_ifc.py
+      - name: Kiểm tra xuất đồng loạt
+        run: python tests/smoke_batch.py
+      - name: Kiểm tra mặt bằng 1:1 theo quy ước
+        run: python tests/smoke_plan11.py
       - name: Đóng gói exe
         run: pyinstaller --noconfirm VE_MONGBANKOSUON.spec
       - uses: actions/upload-artifact@v4

@@ -59,9 +59,10 @@ def build(p: dict, frame_path: str | None = None, fields: dict | None = None, of
     if detail:
         origins.append((SHEET_DX, 0.0))
         n0 = len(msp)
-        c2 = Ctx(doc, msp, SHEET_DX, 0.0, g.den, offsets, "s2")
-        frame.place(doc, SHEET_DX, 0.0, title_values(p, sheet2.sheet_den(g), 2, nsheet), fields, tags, c2)
-        sheet2.draw(c2, g)
+        g2 = sheet2.sheet_geo(p, g)               # móng lớn: tờ 2 có thể dùng tỷ lệ nhỏ hơn tờ 1
+        c2 = Ctx(doc, msp, SHEET_DX, 0.0, g2.den, offsets, "s2")
+        frame.place(doc, SHEET_DX, 0.0, title_values(p, sheet2.sheet_den(g2), 2, nsheet), fields, tags, c2)
+        sheet2.draw(c2, g2)
         handles.append({e.dxf.handle for e in list(msp)[n0:]})
         objs.append(c2.objs)
 
